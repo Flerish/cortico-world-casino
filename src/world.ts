@@ -542,18 +542,16 @@ export class CasinoWorld implements World {
       `闲家 ${handsText} 对 庄家 ${record.dealerCards.join(' ')}(${dealer.total}${dealer.total > 21 ? ',爆' : ''})${insText}。`,
       `闲家净 ${delta >= 0 ? '+' : ''}${delta}。你的筹码 ${state.ai.chips},主人 ${state.player.chips}。`,
     ].join(' ');
-    // AI 自己当闲家打的手,结果已经在它的工具回执里,不再重复投事件;AI 坐庄(主人打)
-    // 时用 flush 立即唤醒,让它每局都能开口说心路历程。
-    if (state.aiRole !== 'player') {
-      void this.host?.pushEvent({
-        type: 'casino.result',
-        ts: nowIso(this.opts.timezone),
-        source: this.id,
-        origin: 'internal',
-        senderKey: this.id,
-        text: line,
-      }, { trigger: 'flush' });
-    }
+    // 每手结算都推事件(flush):AI 坐庄时这是叫它开口的铃;AI 当闲家时回执里已有同一份
+    // 结算,事件让它有机会收尾——重复口径由环境提示词管住。
+    void this.host?.pushEvent({
+      type: 'casino.result',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: line,
+    }, { trigger: 'flush' });
     return line;
   }
 
