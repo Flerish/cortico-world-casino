@@ -34,7 +34,7 @@
     },
     {
       "name": "casino_player",
-      "description": "Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: \"bet\" (place a stake within [minBet, maxBet] and both balances to start the hand), \"hit\" (draw one card face up; busting settles that hand), \"stand\", \"double\" (first two cards of a hand: stake doubles, one card, then that hand stands), \"split\" (two equal-rank cards become two hands, each matched-bet and drawn one card; split aces get one card each), \"insurance\" (only when the dealer shows an Ace: amount 0 declines, up to half the bet pays 2:1 if the dealer has blackjack), \"surrender\" (first decision on a fresh two-card hand: forfeit half the bet and end it).",
+      "description": "Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: \"bet\" (place a stake within [minBet, maxBet] to start the hand), \"hit\" (draw one card face up; busting settles that hand), \"stand\", \"double\" (first two cards of a hand: stake doubles, one card, then that hand stands), \"split\" (two equal-rank cards become two hands, each matched-bet and drawn one card; split aces get one card each), \"insurance\" (only when the dealer shows an Ace: amount 0 declines, up to half the bet pays 2:1 if the dealer has blackjack), \"surrender\" (first decision on a fresh two-card hand: forfeit half the bet and end it).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,

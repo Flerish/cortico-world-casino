@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+﻿import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -55,7 +55,7 @@ function worldWith(rng?: () => number, cfgPatch: Partial<typeof CASINO_DEFAULTS>
   const ctx = fakeWorldContext(CASINO, { scratchDir });
   // 测试不要发牌停顿;单独测节奏时在 cfgPatch 里覆盖。
   Object.assign(ctx.cfg, { dealDelayMs: 0, ...cfgPatch });
-  return new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, rng });
+  return new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, botDir: ctx.botDir, rng });
 }
 
 async function tool(world: CasinoWorld, name: string, args: Record<string, unknown>): Promise<string> {
@@ -138,7 +138,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     const stand = await tool(world, 'casino_player', { action: 'stand' });
     // 庄家 ♠4♠5=9 → 补 ♠7(16) → 补 ♠8(24) 爆 → 闲(AI)赢
     expect(stand).toContain('庄家 ♠4 ♠5 ♠7 ♠8(24,爆)');
-    expect(stand).toContain('闲家净 +50');
+    expect(stand).toContain('净 +50');
     const match = stand.match(/你的筹码 (\d+),主人 (\d+)/);
     expect(match?.[1]).toBe('1050');
     expect(match?.[2]).toBe('950');
@@ -175,7 +175,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     const stand = await tool(world, 'casino_player', { action: 'stand' });
     // 闲 ♠2♠3(5);庄 A♠+♣6 = 软 17 → S17 停 → 17 > 5,闲输
     expect(stand).toContain('庄家 ♠A ♣6(17)');
-    expect(stand).toContain('闲家净 -50');
+    expect(stand).toContain('净 -50');
     await world.stop();
 
     rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 0), card(6, 2), card(5, 0), card(13, 0)] });
@@ -187,7 +187,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     const stand2 = await tool(h17, 'casino_player', { action: 'stand' });
     // H17:软 17 补 ♠5 → 12 → 再补 ♠K(10) → 22 爆 → 闲赢
     expect(stand2).toContain('爆');
-    expect(stand2).toContain('闲家净 +50');
+    expect(stand2).toContain('净 +50');
     await h17.stop();
   });
 
@@ -424,6 +424,17 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     }
     const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap & { matches: unknown[] };
     expect(snap.matches).toHaveLength(10);
+    await world.stop();
+  });
+
+  it('部署语言 en:回执与状态走英文表', async () => {
+    const deploymentDir = join(scratchDir, 'deployment');
+    mkdirSync(deploymentDir, { recursive: true });
+    writeFileSync(join(deploymentDir, 'config.json'), JSON.stringify({ language: 'en' }), 'utf8');
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    const status = await tool(world, 'casino_bank', { action: 'status' });
+    expect(status).toContain('Your balance: 1000');
     await world.stop();
   });
 

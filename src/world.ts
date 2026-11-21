@@ -1,9 +1,10 @@
-/**
+﻿/**
  * 月下牌桌:标准 21 点。AI 与玩家对坐,开局选庄;庄家是机械的银行——不管坐着的是谁,
  * 闲家打完手牌后引擎替庄家翻暗牌、按固定规则补牌(不足 17 必须补,软 17 停/补可配)。
  * 全场唯一的暗牌是庄家的第二张;闲家的牌全部明牌。闲家先行动,先爆先输。
  * 支持分牌(同点首两张,一手变两手)、保险(庄家亮 A 时)、投降(首两张弃一半)。
- * 回执与事件只陈述机械事实(点数、结果、余额),不做启发式推断。
+ * 所有面向模型的文字(事件、回执、错误)按部署语言出中英两份,见 model-text.ts;
+ * 面板文字按浏览器语言,见 webui/strings.ts。
  */
 import { fileURLToPath } from 'node:url';
 import type { ToolCallContext, ToolDef, World, WorldHost, WorldStreamSocket, WorldWebUiDecl } from 'cortico/core/types.ts';
@@ -11,6 +12,7 @@ import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { dealerShouldHit, formatCard, handValue, freshDeck, shuffled, type Card } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
+import { modelText, readModelLanguage, type ModelText } from './model-text.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
   formatHand,
@@ -28,7 +30,10 @@ import {
   type TableState,
 } from './table.ts';
 
-const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
+const ENV_PROMPT_FILES: Record<'zh' | 'en', string> = {
+  zh: fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url)),
+  en: fileURLToPath(new URL('./ENV_PROMPT.en.md', import.meta.url)),
+};
 
 export interface CasinoWorldOptions {
   /** `worlds.casino` 的活引用;startChips 等现读即生效。 */
@@ -36,6 +41,8 @@ export interface CasinoWorldOptions {
   timezone: string;
   /** 部署数据目录;桌面存档写这里的 casino-table.json。 */
   dataDir: string;
+  /** 部署目录;模型文字的语言读这里的 config.json。 */
+  botDir: string;
   /** 可注入的随机源;测试用它定牌。缺省 Math.random。 */
   rng?: () => number;
 }
@@ -66,7 +73,7 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'casino_player',
     description:
-      'Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: "bet" (place a stake within [minBet, maxBet] and both balances to start the hand), "hit" (draw one card face up; busting settles that hand), "stand", "double" (first two cards of a hand: stake doubles, one card, then that hand stands), "split" (two equal-rank cards become two hands, each matched-bet and drawn one card; split aces get one card each), "insurance" (only when the dealer shows an Ace: amount 0 declines, up to half the bet pays 2:1 if the dealer has blackjack), "surrender" (first decision on a fresh two-card hand: forfeit half the bet and end it).',
+      'Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: "bet" (place a stake within [minBet, maxBet] to start the hand), "hit" (draw one card face up; busting settles that hand), "stand", "double" (first two cards of a hand: stake doubles, one card, then that hand stands), "split" (two equal-rank cards become two hands, each matched-bet and drawn one card; split aces get one card each), "insurance" (only when the dealer shows an Ace: amount 0 declines, up to half the bet pays 2:1 if the dealer has blackjack), "surrender" (first decision on a fresh two-card hand: forfeit half the bet and end it).',
     tags: ['act'],
     parameters: {
       type: 'object',
@@ -94,14 +101,14 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   },
 ];
 
-const OUTCOME_TEXT: Record<Outcome, string> = {
-  win: '赢',
-  lose: '输',
-  push: '平',
-  blackjack: '黑杰克',
-  bust: '爆牌',
-  surrender: '投降',
-};
+const OUTCOME_KEYS = {
+  win: 'outcomeWin',
+  lose: 'outcomeLose',
+  push: 'outcomePush',
+  blackjack: 'outcomeBlackjack',
+  bust: 'outcomeBust',
+  surrender: 'outcomeSurrender',
+} as const;
 
 export class CasinoWorld implements World {
   readonly id = 'casino';
@@ -112,7 +119,12 @@ export class CasinoWorld implements World {
 
   constructor(private readonly opts: CasinoWorldOptions) {}
 
-  /** 只报值;前缀文本一律来自 ENV_PROMPT.md 模板。 */
+  /** 模型文字:按部署 config.json 的 language 每次现读,改语言无需重启。 */
+  private mt(): ModelText {
+    return modelText(readModelLanguage(this.opts.botDir));
+  }
+
+  /** 只报值;前缀文本一律来自 ENV_PROMPT 模板(按模型语言选文件)。 */
   envPromptVars(): Record<string, string> {
     return {
       'casino.startChips': String(this.opts.cfg.startChips),
@@ -129,12 +141,15 @@ export class CasinoWorld implements World {
   }
 
   webUi(language?: Language): WorldWebUiDecl {
+    const modelLang = readModelLanguage(this.opts.botDir);
     return {
       panels: [
         {
           id: 'table',
-          title: '牌桌',
-          description: '与 AI 同桌打标准 21 点:选庄、下注、要牌、停牌、分牌、保险,绿呢桌面实时显示双方的牌。',
+          title: language === 'en' ? 'Blackjack table' : '牌桌',
+          description: language === 'en'
+            ? 'Play standard blackjack against the AI: pick the dealer, bet, hit and stand on the green felt.'
+            : '与 AI 同桌打标准 21 点:选庄、下注、要牌、停牌,绿呢桌面实时显示双方的牌。',
           getMethods: ['state', 'history'],
         },
       ],
@@ -144,14 +159,16 @@ export class CasinoWorld implements World {
       promptDocs: [
         {
           key: 'worlds.casino.envPrompt',
-          title: '月下牌桌 · 环境提示词',
-          description: '月下牌桌进 system 前缀的那一段。',
-          path: ENV_PROMPT_FILE,
+          title: language === 'en' ? 'Moonlit Table · environment prompt' : '月下牌桌 · 环境提示词',
+          description: language === 'en'
+            ? 'The Moonlit Table section in the system prefix.'
+            : '月下牌桌进 system 前缀的那一段。',
+          path: ENV_PROMPT_FILES[modelLang],
           role: 'envPrompt',
           vars: [
-            { name: 'casino.startChips', description: '配置里的起始筹码,此刻的值。' },
-            { name: 'casino.minBet', description: '配置里的最小下注,此刻的值。' },
-            { name: 'casino.maxBet', description: '配置里的单手最大下注,此刻的值。' },
+            { name: 'casino.startChips', description: language === 'en' ? 'The configured starting chips, right now.' : '配置里的起始筹码,此刻的值。' },
+            { name: 'casino.minBet', description: language === 'en' ? 'The configured minimum bet, right now.' : '配置里的最小下注,此刻的值。' },
+            { name: 'casino.maxBet', description: language === 'en' ? 'The configured maximum bet per hand, right now.' : '配置里的单手最大下注,此刻的值。' },
           ],
         },
       ],
@@ -186,45 +203,53 @@ export class CasinoWorld implements World {
     if (name === 'casino_table') return this.toolTable(args);
     if (name === 'casino_player') return this.toolPlayer(args);
     if (name === 'casino_bank') return this.toolBank(args);
-    return `未知的工具 ${name}。`;
+    return `Unknown tool ${name}.`;
   }
 
   private toolTable(args: Record<string, unknown>): string {
+    const mt = this.mt();
     const state = this.state!;
     if (String(args.action ?? '') === 'history') {
       const limit = Math.min(Math.max(Math.floor(Number(args.limit ?? 10)) || 10, 1), 50);
-      const lines = state.history.slice(0, limit).map((r, i) => {
-        const hands = r.hands
-          .map((h) => `${h.cards.join(' ')}(${OUTCOME_TEXT[h.outcome]})`)
-          .join(' / ');
-        const ins = r.insurance > 0 ? `,保险 ${r.insurance}${r.insuranceWon ? '(赢)' : '(输)'}` : '';
-        return `${i + 1}. 第${r.round}手 庄:${r.dealer === 'ai' ? '你' : '主人'} 押 ${r.bet}${ins},闲家 ${hands} 对 庄家 ${r.dealerCards.join(' ')},净 ${r.delta >= 0 ? '+' : ''}${r.delta}`;
-      });
-      return lines.length ? `最近 ${lines.length} 手:\n${lines.join('\n')}` : '还没有记录。';
+      const lines = state.history.slice(0, limit).map((r, i) =>
+        mt.historyLine(
+          i + 1,
+          r.round,
+          r.dealer === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner,
+          r.bet,
+          r.insurance,
+          r.insuranceWon,
+          r.hands.map((h) => `${h.cards.join(' ')}(${mt[OUTCOME_KEYS[h.outcome]]})`).join(' / '),
+          r.dealerCards.join(' '),
+          `${r.delta >= 0 ? '+' : ''}${r.delta}`,
+        ),
+      );
+      return lines.length ? `${mt.historyTitle(lines.length)}\n${lines.join('\n')}` : mt.noHistoryYet;
     }
     const aiDealer = state.aiRole === 'dealer';
-    const roleText = state.aiRole === null ? '还没开局(主人在面板选庄后开始)' : aiDealer ? '你是庄家(机械银行,引擎替你按规则打),主人是闲家' : '你是闲家,主人是庄家';
+    const roleText = state.aiRole === null ? mt.statusNoGame : aiDealer ? mt.statusYouDealer : mt.statusYouPlayer;
     const phaseText: Record<Phase, string> = {
-      idle: '等开下一手',
-      betting: aiDealer ? '等主人(闲家)下注' : '等你(闲家)下注',
-      insurance: aiDealer ? '等主人(闲家)决定保险' : '等你(闲家)决定保险',
-      playerActing: aiDealer ? '等主人(闲家)要牌/停牌等' : '等你(闲家)要牌/停牌等',
+      idle: mt.statusIdle,
+      betting: aiDealer ? mt.statusBettingOwner : mt.statusBettingYou,
+      insurance: aiDealer ? mt.statusInsuranceOwner : mt.statusInsuranceYou,
+      playerActing: aiDealer ? mt.statusActingOwner : mt.statusActingYou,
     };
     const lines = [
-      `第 ${state.round} 手(${state.round === 0 ? '还没打过' : `上一手底注 ${state.bet}`})。${roleText},${phaseText[state.phase]}。`,
-      `你的筹码:${state.ai.chips};主人筹码:${state.player.chips}(起始 ${this.opts.cfg.startChips},最小注 ${this.opts.cfg.minBet},单手上限 ${this.opts.cfg.maxBet},庄家${this.opts.cfg.dealerHitsSoft17 ? '软 17 也补(H17)' : '软 17 停(S17)'})。`,
+      `${mt.statusRound(state.round, state.bet)} ${roleText} ${phaseText[state.phase]}`,
+      mt.statusChips(state.ai.chips, state.player.chips, this.opts.cfg.startChips, this.opts.cfg.minBet, this.opts.cfg.maxBet, this.opts.cfg.dealerHitsSoft17 ? mt.dealerSoftHits : mt.dealerSoftStands),
     ];
     if (state.phase !== 'idle') {
-      lines.push(`底注 ${state.bet}${state.insurance > 0 ? `,保险 ${state.insurance}(${state.insuranceOutcome === 'won' ? '已赢' : state.insuranceOutcome === 'lost' ? '已输' : '待定'})` : ''}。`);
-      const hands = state.hands.map((hand, i) => {
-        const mark = state.phase === 'playerActing' && i === state.activeHand ? '[当前]' : '';
-        return `${mark}闲家手:${this.cards(hand.cards)}(${handValue(hand.cards).total})`;
-      });
-      lines.push(...hands);
+      const resolved = state.insuranceOutcome === 'won' ? mt.insuranceWonNote : state.insuranceOutcome === 'lost' ? mt.insuranceLostNote : mt.insurancePending;
+      lines.push(mt.statusBet(state.bet) + mt.statusInsuranceNote(state.insurance, resolved));
+      for (const [i, hand] of state.hands.entries()) {
+        const mark = i === state.activeHand && state.hands.some((h) => !h.stood) ? mt.statusHandCurrentMark : '';
+        const value = handValue(hand.cards);
+        lines.push(mt.statusHandLine(mark, this.cards(hand.cards), value.total, value.soft, hand.bet, hand.doubled, hand.stood));
+      }
       if (state.holeRevealed) {
-        lines.push(`庄家手(已亮):${this.cards(state.dealerCards)}(${handValue(state.dealerCards).total})。`);
+        lines.push(mt.statusDealerRevealed(this.cards(state.dealerCards), handValue(state.dealerCards).total));
       } else if (state.dealerCards.length) {
-        lines.push(`庄家明牌:${formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })},暗牌未翻。`);
+        lines.push(mt.statusDealerUpcard(formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })));
       }
     }
     return lines.join('\n');
@@ -232,44 +257,46 @@ export class CasinoWorld implements World {
 
   private async toolPlayer(args: Record<string, unknown>): Promise<string> {
     const state = this.state!;
-    if (state.aiRole !== 'player') return state.aiRole === null ? '还没开局,主人在面板选庄后才有你的角色。' : '这一桌你是庄家(机械银行,引擎按规则替你打),没有闲家动作可做;主人的牌就是你的牌。';
+    if (state.aiRole !== 'player') {
+      return state.aiRole === null ? this.mt().noGameYet : this.mt().youAreDealerNote;
+    }
     const result = await this.playerAction(args);
     return result.text;
   }
 
   private toolBank(args: Record<string, unknown>): string {
+    const mt = this.mt();
     const state = this.state!;
     const seat = state.ai;
     if (String(args.action ?? '') === 'relief') {
       if (seat.chips >= this.opts.cfg.minBet) {
-        return `救济只给破产的人:你的余额 ${seat.chips} 还够最小注 ${this.opts.cfg.minBet}。`;
+        return mt.reliefOnlyWhenBroke(seat.chips, this.opts.cfg.minBet);
       }
       seat.chips = this.opts.cfg.startChips;
       seat.bankruptcies++;
       this.save();
       this.broadcast();
-      return `救济金 ${this.opts.cfg.startChips} 已到账,余额 ${seat.chips};这是你第 ${seat.bankruptcies} 次破产。牌桌不记账外的东西。`;
+      return mt.reliefGranted(this.opts.cfg.startChips, seat.chips, seat.bankruptcies);
     }
-    return [
-      `你的余额:${seat.chips}(累计 ${seat.wins} 胜 / ${seat.losses} 负 / ${seat.pushes} 平,净 ${seat.net >= 0 ? '+' : ''}${seat.net},破产 ${seat.bankruptcies} 次)。`,
-      `主人余额:${state.player.chips}(${state.player.wins} 胜 / ${state.player.losses} 负 / ${state.player.pushes} 平)。`,
-    ].join('\n');
+    const net = (n: number) => `${n >= 0 ? '+' : ''}${n}`;
+    return mt.bankStatus(seat.chips, seat.wins, seat.losses, seat.pushes, net(seat.net), seat.bankruptcies, state.player.chips, state.player.wins, state.player.losses, state.player.pushes);
   }
 
   // ---------------------------------------------------------------- 对局
 
   /** 闲家动作(AI 经工具、玩家经面板都汇到这里)。庄家自动打牌时逐张停顿,让面板看得清。 */
   private async playerAction(args: Record<string, unknown>): Promise<OpResult> {
+    const mt = this.mt();
     const state = this.state!;
     const action = String(args.action ?? '');
     if (state.phase === 'idle') {
-      return { ok: false, text: '还没有进行中的手;在面板选庄开一手。' };
+      return { ok: false, text: mt.noHandDeal };
     }
     if (action === 'bet') {
-      if (state.phase !== 'betting') return { ok: false, text: '这一手已经开了,别重复下注。' };
+      if (state.phase !== 'betting') return { ok: false, text: mt.handAlreadyOpen };
       const amount = this.readBet(args.amount);
       if (typeof amount === 'string') return { ok: false, text: amount };
-      this.notifyAction(`主人下注 ${amount},让你坐庄。`);
+      this.notifyAction(mt.betPlaced(amount));
       const settled = await this.deal(amount);
       this.save();
       this.broadcast();
@@ -277,60 +304,60 @@ export class CasinoWorld implements World {
       return { ok: true, text: this.actingReceipt() };
     }
     if (action === 'insurance') {
-      if (state.phase !== 'insurance') return { ok: false, text: '现在不是决定保险的时候(只有庄家亮 A 才有)。' };
+      if (state.phase !== 'insurance') return { ok: false, text: mt.notInsuranceTime };
       const amount = Math.floor(Number(args.amount ?? 0));
-      if (!Number.isFinite(amount) || amount < 0) return { ok: false, text: '保险金额要是非负整数,0 表示不买。' };
+      if (!Number.isFinite(amount) || amount < 0) return { ok: false, text: mt.insuranceNotInteger };
       const maxIns = Math.floor(state.bet / 2);
-      if (amount > maxIns) return { ok: false, text: `保险最多 ${maxIns}(底注的一半)。` };
+      if (amount > maxIns) return { ok: false, text: mt.insuranceMaxIs(maxIns) };
       const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
-      if (amount > idlerChips) return { ok: false, text: `余额 ${idlerChips} 付不起 ${amount} 的保险。` };
+      if (amount > idlerChips) return { ok: false, text: mt.cannotAffordInsurance(idlerChips, amount) };
       state.insurance = amount;
-      this.notifyAction(amount > 0 ? `主人买保险 ${amount}。` : `主人看了眼庄家的明牌 A,决定不买保险。`);
+      this.notifyAction(amount > 0 ? mt.insuranceBought(amount) : mt.insuranceDeclined);
       return await this.resolveInsurance();
     }
     if (state.phase !== 'playerActing') {
-      return { ok: false, text: state.phase === 'betting' ? '先下注,才有手可打。' : state.phase === 'insurance' ? '先决定保险(或声明不买),再打牌。' : '现在没有进行中的手。' };
+      return { ok: false, text: state.phase === 'betting' ? mt.betFirst : state.phase === 'insurance' ? mt.insuranceDecideFirst : mt.noHandDeal };
     }
     if (state.dealerActing) {
-      return { ok: false, text: '庄家正在按规则打牌,稍等结算。' };
+      return { ok: false, text: mt.dealerTurnInProgress };
     }
     const hand = state.hands[state.activeHand]!;
     if (action === 'hit') {
       hand.cards.push(this.draw());
       if (handValue(hand.cards).total > 21) hand.stood = true;
       const value = handValue(hand.cards);
-      this.notifyAction(`主人要牌,拿到 ${formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 })}:闲家手 ${this.cards(hand.cards)}(${value.total} 点${this.bustText(value.total)})。`);
+      this.notifyAction(mt.ownerHits(formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 }), this.cards(hand.cards), value.total, this.bustNote(value.total)));
       return await this.advanceOrPlay(hand);
     }
     if (action === 'stand') {
       hand.stood = true;
-      this.notifyAction(`主人停在 ${handValue(hand.cards).total} 点(${this.cards(hand.cards)})。`);
+      this.notifyAction(mt.ownerStands(handValue(hand.cards).total, this.cards(hand.cards)));
       return await this.advanceOrPlay(hand);
     }
     if (action === 'double') {
-      if (hand.cards.length !== 2) return { ok: false, text: '只有一手的前两张牌能加倍。' };
+      if (hand.cards.length !== 2) return { ok: false, text: mt.doubleTwoCardsOnly };
       const doubled = hand.bet * 2;
-      if (doubled > this.opts.cfg.maxBet) return { ok: false, text: `加倍后会超过单手上限 ${this.opts.cfg.maxBet}。` };
+      if (doubled > this.opts.cfg.maxBet) return { ok: false, text: mt.doubledOverMax(this.opts.cfg.maxBet) };
       const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
       const otherBets = state.hands.reduce((sum, h) => sum + h.bet, 0) - hand.bet;
       if (doubled + otherBets > idlerChips) {
-        return { ok: false, text: `加倍后你的总注 ${doubled + otherBets} 超出了你的余额 ${idlerChips}。` };
+        return { ok: false, text: mt.doubledOverBalance(doubled + otherBets, idlerChips) };
       }
       hand.bet = doubled;
       hand.doubled = true;
       hand.cards.push(this.draw());
       hand.stood = true;
       const value = handValue(hand.cards);
-      this.notifyAction(`主人加倍:注翻到 ${hand.bet},补一张 ${formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 })},停在 ${value.total} 点${this.bustText(value.total)}。`);
+      this.notifyAction(mt.ownerDoubles(hand.bet, formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 }), value.total, this.bustNote(value.total)));
       return await this.advanceOrPlay(hand);
     }
     if (action === 'split') {
-      if (state.hands.length > 1) return { ok: false, text: '这只允许分一次(两手)。' };
-      if (hand.cards.length !== 2) return { ok: false, text: '只有刚发的两张牌能分。' };
-      if (hand.cards[0]!.rank !== hand.cards[1]!.rank) return { ok: false, text: '两张牌点数相同才能分。' };
+      if (state.hands.length > 1) return { ok: false, text: mt.splitOnceOnly };
+      if (hand.cards.length !== 2) return { ok: false, text: mt.splitTwoCardsOnly };
+      if (hand.cards[0]!.rank !== hand.cards[1]!.rank) return { ok: false, text: mt.splitSameRank };
       const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
       if (hand.bet * 2 > this.opts.cfg.maxBet * 2 || hand.bet * 2 > idlerChips) {
-        return { ok: false, text: `分牌后总注 ${hand.bet * 2} 超出上限或你的余额 ${idlerChips}。` };
+        return { ok: false, text: mt.splitOverLimits(hand.bet * 2, idlerChips) };
       }
       const card0 = hand.cards[0]!;
       const card1 = hand.cards[1]!;
@@ -346,7 +373,7 @@ export class CasinoWorld implements World {
       }
       state.hands = [hand0, hand1];
       state.activeHand = 0;
-      this.notifyAction(`主人把一对同点牌分成两手,各押 ${hand.bet}:一手 ${this.cards(hand0.cards)},二手 ${this.cards(hand1.cards)}${isAce ? ',分 A 各一张即停' : ''}。`);
+      this.notifyAction(mt.ownerSplits(hand.bet, this.cards(hand0.cards), this.cards(hand1.cards), isAce ? mt.splitAcesNote : ''));
       if (hand0.stood && hand1.stood) {
         return { ok: true, text: await this.dealerPlayAndSettle() };
       }
@@ -356,14 +383,14 @@ export class CasinoWorld implements World {
     }
     if (action === 'surrender') {
       if (state.hands.length > 1 || hand.cards.length !== 2 || hand.fromSplit) {
-        return { ok: false, text: '投降只在开局的前两张、还没分过牌的时候可以。' };
+        return { ok: false, text: mt.surrenderFreshOnly };
       }
       hand.outcome = 'surrender';
       hand.stood = true;
-      this.notifyAction(`主人投降,弃一半注结束这手。`);
+      this.notifyAction(mt.ownerSurrendered);
       return { ok: true, text: this.settle() };
     }
-    return { ok: false, text: `未知动作 ${action};取 bet / hit / stand / double / split / insurance / surrender。` };
+    return { ok: false, text: mt.unknownAction(action, 'bet / hit / stand / double / split / insurance / surrender') };
   }
 
   /** 主人(AI 坐庄时的闲家)做了一个动作:flush 推给 AI,让它即时回应。 */
@@ -380,8 +407,8 @@ export class CasinoWorld implements World {
   }
 
   /** 点数超过 21 时的附带说明,否则空串。 */
-  private bustText(total: number): string {
-    return total > 21 ? ',爆' : '';
+  private bustNote(total: number): string {
+    return total > 21 ? this.mt().bustNote : '';
   }
 
   /** 当前手打完(停/爆/加倍):看后面还有没有手;没有就轮到庄家——但全爆时庄家直接收注,不补牌。 */
@@ -403,6 +430,7 @@ export class CasinoWorld implements World {
 
   /** 发一手牌:闲家两张明牌,庄家一亮一暗。 */
   private async deal(bet: number): Promise<string | null> {
+    const mt = this.mt();
     const state = this.state!;
     state.bet = bet;
     state.insurance = 0;
@@ -482,6 +510,7 @@ export class CasinoWorld implements World {
 
   /** 结算:逐手比点、保险并账、转账、记档、推事件、回 idle(牌留在桌面上)。 */
   private settle(): string {
+    const mt = this.mt();
     const state = this.state!;
     const dealer = handValue(state.dealerCards);
     const playerIsIdler = state.aiRole === 'player';
@@ -545,14 +574,20 @@ export class CasinoWorld implements World {
     this.save();
     this.broadcast();
     const handsText = handViews
-      .map((h) => `${h.cards.join(' ')}(${OUTCOME_TEXT[h.outcome]})`)
+      .map((h) => `${h.cards.join(' ')}(${mt[OUTCOME_KEYS[h.outcome]]})`)
       .join(' / ');
-    const insText = state.insurance > 0 ? `,保险 ${state.insurance}${state.insuranceOutcome === 'won' ? '赔 2:1' : '被收走'}` : '';
-    const line = [
-      `第 ${record.round} 手结算(庄:${record.dealer === 'ai' ? '你' : '主人'})。`,
-      `闲家 ${handsText} 对 庄家 ${record.dealerCards.join(' ')}(${dealer.total}${dealer.total > 21 ? ',爆' : ''})${insText}。`,
-      `闲家净 ${delta >= 0 ? '+' : ''}${delta}。你的筹码 ${state.ai.chips},主人 ${state.player.chips}。`,
-    ].join(' ');
+    const insText = state.insurance > 0 ? `,${mt.insuranceBought(state.insurance)}${state.insuranceOutcome === 'won' ? ' (2:1)' : ''}` : '';
+    const line = mt.settleLine(
+      record.round,
+      record.dealer === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner,
+      handsText,
+      record.dealerCards.join(' '),
+      dealer.total,
+      dealer.total > 21 ? mt.dealerBustNote : '',
+      `${delta >= 0 ? '+' : ''}${delta}`,
+      state.ai.chips,
+      state.player.chips,
+    );
     // 每手结算都推事件(flush):AI 坐庄时这是叫它开口的铃;AI 当闲家时回执里已有同一份
     // 结算,事件让它有机会收尾——重复口径由环境提示词管住。
     void this.host?.pushEvent({
@@ -568,28 +603,28 @@ export class CasinoWorld implements World {
 
   /** 闲家手进行中的回执:每手的牌与点数、庄家明牌、押注与余额;保险阶段附决定提示。 */
   private actingReceipt(): string {
+    const mt = this.mt();
     const state = this.state!;
     const aiIsIdler = state.aiRole === 'player';
     const ownChips = aiIsIdler ? state.ai.chips : state.player.chips;
     const hands = state.hands.map((hand, i) => {
-      const mark = i === state.activeHand && state.hands.some((h) => !h.stood) ? '[当前]' : '';
+      const mark = i === state.activeHand && state.hands.some((h) => !h.stood) ? mt.statusHandCurrentMark : '';
       const value = handValue(hand.cards);
-      return `${mark}闲家手:${this.cards(hand.cards)}(${value.total}${value.soft ? ' 软' : ''}),押 ${hand.bet}${hand.doubled ? '(已加倍)' : ''}${hand.stood ? '(已停)' : ''}`;
+      return mt.statusHandLine(mark, this.cards(hand.cards), value.total, value.soft, hand.bet, hand.doubled, hand.stood);
     });
-    const insuranceNote = state.phase === 'insurance'
-      ? `庄家亮 A:先用 casino_player 的 insurance 决定保险(amount:0 为不买,最多 ${Math.floor(state.bet / 2)})。`
-      : '';
+    const insuranceNote = state.phase === 'insurance' ? mt.insurancePrompt(Math.floor(state.bet / 2)) : '';
     return [
-      `${aiIsIdler ? '手还在进行' : '主人的手还在进行'}。`,
+      aiIsIdler ? mt.handInProgress : mt.ownersHandInProgress,
       ...hands,
-      `庄家明牌:${formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })},暗牌未翻。底注 ${state.bet}${state.insurance > 0 ? `,保险 ${state.insurance}` : ''},你的余额 ${ownChips}。`,
+      `${mt.statusDealerUpcard(formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 }))} ${mt.statusBet(state.bet)} ${mt.holeHiddenNote} ${mt.bankStatusOwn(ownChips)}`,
       insuranceNote,
-      aiIsIdler ? '接下来用 casino_player 继续。' : '',
+      aiIsIdler ? mt.playerNextHint : '',
     ].filter(Boolean).join('\n');
   }
 
   /** 轮到 AI(闲家):下注或保险决定,推 flush 事件。 */
   private notifyBettingTurn(): void {
+    const mt = this.mt();
     const state = this.state!;
     void this.host?.pushEvent({
       type: 'casino.turn',
@@ -597,20 +632,20 @@ export class CasinoWorld implements World {
       source: this.id,
       origin: 'internal',
       senderKey: this.id,
-      text: `轮到你下注。你是闲家,主人坐庄。最小注 ${this.opts.cfg.minBet},单手上限 ${this.opts.cfg.maxBet},你的余额 ${state.ai.chips},庄家银行 ${state.player.chips};押注不能超过两边较小的那个。用 casino_player 的 bet 开手。`,
+      text: mt.bettingTurn(this.opts.cfg.minBet, this.opts.cfg.maxBet, state.ai.chips, state.player.chips),
     }, { trigger: 'flush' });
   }
 
   private notifyInsuranceTurn(): void {
+    const mt = this.mt();
     const state = this.state!;
-    const maxIns = Math.floor(state.bet / 2);
     void this.host?.pushEvent({
       type: 'casino.turn',
       ts: nowIso(this.opts.timezone),
       source: this.id,
       origin: 'internal',
       senderKey: this.id,
-      text: `庄家明牌是 A,你可以买保险:最多 ${maxIns}(底注的一半),庄家是黑杰克就按 2:1 赔,不是就被收走;不想买就 amount:0。用 casino_player 的 insurance 决定。`,
+      text: mt.insuranceTurn(Math.floor(state.bet / 2), state.ai.chips, state.player.chips),
     }, { trigger: 'flush' });
   }
 
@@ -620,7 +655,7 @@ export class CasinoWorld implements World {
     if (panel !== 'table') throw new Error(`unknown panel ${panel}`);
     if (!this.state) this.state = loadTable(this.opts.dataDir) ?? newTable(this.opts.cfg.startChips);
     if (method === 'state') return this.snapshot();
-    if (method === 'history') return { history: this.state.history };
+    if (method === 'history') return { history: this.state.history, matches: this.matches };
     if (method !== 'action') throw new Error(`unknown method ${method}`);
     const arg = (args[0] ?? {}) as Record<string, unknown>;
     const action = String(arg.action ?? '');
@@ -628,8 +663,8 @@ export class CasinoWorld implements World {
 
     if (action === 'newgame') {
       const dealer = String(arg.dealer ?? '');
-      if (dealer !== 'ai' && dealer !== 'player') throw new Error('庄家要写 ai 或 player。');
-      if (state.phase !== 'idle') throw new Error('这一手还没打完。');
+      if (dealer !== 'ai' && dealer !== 'player') throw new Error(this.mt().errNewgameDealerArg);
+      if (state.phase !== 'idle') throw new Error(this.mt().handNotFinished);
       state.aiRole = dealer === 'ai' ? 'dealer' : 'player';
       state.round++;
       state.phase = 'betting';
@@ -639,13 +674,14 @@ export class CasinoWorld implements World {
       state.insurance = 0;
       state.insuranceOutcome = 'none';
       state.bet = 0;
+      state.dealerActing = false;
       this.save();
       this.broadcast();
       if (state.aiRole === 'player') this.notifyBettingTurn();
       return this.snapshot();
     }
     if (action === 'relief') {
-      if (state.player.chips >= this.opts.cfg.minBet) throw new Error('救济只给破产的人。');
+      if (state.player.chips >= this.opts.cfg.minBet) throw new Error(this.mt().reliefOnlyWhenBroke(state.player.chips, this.opts.cfg.minBet));
       state.player.chips = this.opts.cfg.startChips;
       state.player.bankruptcies++;
       this.save();
@@ -653,7 +689,7 @@ export class CasinoWorld implements World {
       return this.snapshot();
     }
     if (action === 'resetmatch') {
-      if (state.dealerActing) throw new Error('庄家正在按规则打牌,等这一手结算完再归档重开。');
+      if (state.dealerActing) throw new Error(this.mt().matchResetDealerPlaying);
       this.recordMatchAndReset();
       return this.snapshot();
     }
@@ -666,20 +702,21 @@ export class CasinoWorld implements World {
         this.notifyInsuranceTurn();
         return this.snapshot();
       }
-      throw new Error('现在没有在等 AI。');
+      throw new Error(this.mt().errAINotWaiting);
     }
 
     if (['bet', 'hit', 'stand', 'double', 'split', 'insurance', 'surrender'].includes(action)) {
-      if (state.aiRole !== 'dealer') throw new Error('你是庄家,闲家是自动的(AI);选庄后再开一手。');
+      if (state.aiRole !== 'dealer') throw new Error(this.mt().youAreDealerNote);
       const result = await this.playerAction(action === 'bet' || action === 'insurance' ? { action, amount: arg.amount } : { action });
       if (!result.ok) throw new Error(result.text);
       return this.snapshot();
     }
-    throw new Error(`未知动作 ${action}`);
+    throw new Error(this.mt().errUnknownActionPanel(action));
   }
 
   /** 「记录并重来」:归档当前场次(最多留 10 场),筹码与战绩清零,重新等选庄。 */
   private recordMatchAndReset(): void {
+    const mt = this.mt();
     const state = this.state!;
     const winner: MatchRecord['winner'] =
       state.ai.chips > state.player.chips ? 'ai' : state.player.chips > state.ai.chips ? 'player' : 'tie';
@@ -718,7 +755,7 @@ export class CasinoWorld implements World {
       source: this.id,
       origin: 'internal',
       senderKey: this.id,
-      text: `主人把这一场(${played} 手)归档了:结束时你 ${record.aiChips} / 主人 ${record.playerChips} 筹码,${record.winner === 'ai' ? '你赢' : record.winner === 'player' ? '主人赢' : '打平'}。双方重新拿 ${startChips},新的一场等选庄开始。`,
+      text: mt.matchArchived(played, record.aiChips, record.playerChips, record.winner === 'ai' ? mt.matchYouWin : record.winner === 'player' ? mt.matchOwnerWins : mt.matchTie, startChips),
     }, { trigger: 'flush' });
   }
 
@@ -788,12 +825,12 @@ export class CasinoWorld implements World {
   /** 校验下注:整数、范围内、不超过闲家自己的余额——赔付把庄家打成负数是可以接受的。 */
   private readBet(raw: unknown): number | string {
     const bet = Math.floor(Number(raw));
-    if (!Number.isFinite(bet)) return `下注要是整数,收到 ${JSON.stringify(raw ?? null)}。`;
+    if (!Number.isFinite(bet)) return this.mt().betNotInteger(JSON.stringify(raw ?? null));
     const state = this.state!;
     const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
-    if (bet < this.opts.cfg.minBet) return `最小下注 ${this.opts.cfg.minBet}。`;
-    if (bet > this.opts.cfg.maxBet) return `单手上限 ${this.opts.cfg.maxBet}。`;
-    if (bet > idlerChips) return `余额 ${idlerChips},押不起 ${bet}。`;
+    if (bet < this.opts.cfg.minBet) return this.mt().minBetIs(this.opts.cfg.minBet);
+    if (bet > this.opts.cfg.maxBet) return this.mt().maxBetIs(this.opts.cfg.maxBet);
+    if (bet > idlerChips) return this.mt().cannotAffordBet(idlerChips, bet);
     return bet;
   }
 
@@ -814,3 +851,4 @@ export class CasinoWorld implements World {
     if (this.state) saveTable(this.opts.dataDir, this.state);
   }
 }
+

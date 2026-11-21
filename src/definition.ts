@@ -7,7 +7,7 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
   label: '月下牌桌',
   defaults: () => ({ ...CASINO_DEFAULTS }),
   // `ctx.cfg` 是 `worlds.casino` 的活引用:热改的键现读即生效。
-  create: (ctx) => new CasinoWorld({ cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir }),
+  create: (ctx) => new CasinoWorld({ cfg: ctx.cfg, timezone: ctx.timezone, dataDir: ctx.dataDir, botDir: ctx.botDir }),
   // 自描述:可能出现的全部工具与会推出的全部事件,不进提示词。
   describe: {
     tools: describeTools(CASINO_TOOL_DECLS, {
