@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- 玩法重做为 AI 与玩家对战:开局在面板选庄(我坐庄 / 让 AI 坐庄),庄闲对位;
+  庄家自由行动(亮暗牌后自行决定要牌/停牌),闲爆即庄赢、庄爆即闲赢、平局退注、
+  黑杰克 1.5 倍。移除 v0.1.0 的「AI 对赌场庄家」单人模式。
+- 事件改为 casino.turn(轮到 AI 下注/做庄)与 casino.result(结算);
+  工具改为 casino_table / casino_player / casino_dealer / casino_bank。
+- 面板按棋牌游戏布局重做:绿呢桌面、CSS 扑克牌面(暗牌牌背)、筹码、
+  按阶段启用的操作按钮、结算横幅、可折叠历史;等待 AI 时可「催一下」。
+
 ## 0.1.0
 
 - 第一版:本地 21 点牌桌。AI 用 casino_play / casino_history / casino_bank 自己打;

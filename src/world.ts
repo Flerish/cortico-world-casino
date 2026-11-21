@@ -1,21 +1,25 @@
 /**
- * 月下牌桌:一个本地 21 点牌桌。AI 通过工具自己打,主人在 WebUI 面板坐同桌。
- * 筹码是游戏内数字。回执与事件只陈述机械事实(点数、结果、余额),不做启发式推断。
+ * 月下牌桌(对战版):AI 与玩家同桌对打 21 点,开局选庄,庄闲对位。
+ * 玩家动作走面板 invoke,AI 动作走工具;轮到 AI 时推 casino.turn 事件。
+ * 回执与事件只陈述机械事实(点数、结果、余额),不做启发式推断。
  */
 import { fileURLToPath } from 'node:url';
 import type { ToolCallContext, ToolDef, World, WorldHost, WorldStreamSocket, WorldWebUiDecl } from 'cortico/core/types.ts';
 import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
-import { dealerShouldHit, formatCard, handValue, freshDeck, shuffled, type Card } from './cards.ts';
+import { formatCard, handValue, freshDeck, shuffled, type Card } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
 import {
   formatHand,
   loadTable,
   newTable,
+  newSeat,
   recordHand,
   saveTable,
+  type HandRecord,
   type Outcome,
-  type Seat,
+  type Phase,
+  type Role,
   type SeatState,
   type TableState,
 } from './table.ts';
@@ -32,8 +36,8 @@ export interface CasinoWorldOptions {
   rng?: () => number;
 }
 
-/** 一次落座操作的结果:ok=false 时 text 是给界面或模型的拒绝理由。 */
-interface SeatPlayResult {
+/** 一次操作的结果:ok=false 时 text 是给界面或模型的拒绝理由。 */
+interface OpResult {
   ok: boolean;
   text: string;
 }
@@ -41,30 +45,47 @@ interface SeatPlayResult {
 /** 全部工具的声明;definition 的 describe 与 tools() 都取它。 */
 export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
-    name: 'casino_play',
+    name: 'casino_table',
     description:
-      'Play one blackjack hand on the Moonlit Table against the dealer. Actions: "deal" (place a bet and get two cards; the receipt holds your cards, the dealer upcard and your remaining chips), "hit" (draw one card; busting settles the hand at once), "stand" (the dealer then draws to 17 and settles), "double" (double the stake on your first two cards, draw exactly one card and stand). One hand must be settled before the next "deal".',
-    tags: ['act'],
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        action: { type: 'string', enum: ['deal', 'hit', 'stand', 'double'], description: 'The action to take.' },
-        bet: { type: 'number', description: 'Stake for "deal", an integer within [minBet, maxBet] and your chip balance. Required for "deal", ignored otherwise.' },
-      },
-      required: ['action'],
-    },
-  },
-  {
-    name: 'casino_history',
-    description: "Read recent settled hands on the Moonlit Table (yours and the owner's) with per-seat totals.",
+      'Read the Moonlit Table state: who is dealer, the phase, the visible cards and totals, the current bet and both chip balances. Actions: "status", "history" (recent settled hands).',
     tags: ['read'],
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        limit: { type: 'number', description: 'How many recent hands to list, 1-50. Default 10.' },
+        action: { type: 'string', enum: ['status', 'history'], description: 'What to read.' },
+        limit: { type: 'number', description: 'For "history": how many recent hands, 1-50. Default 10.' },
       },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'casino_player',
+    description:
+      'Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: "bet" (place a stake within [minBet, maxBet] and both balances to start the hand; the receipt holds your two cards and the dealer upcard), "hit", "stand", "double" (first two cards only, stake doubles, one card, then you stand).',
+    tags: ['act'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['bet', 'hit', 'stand', 'double'], description: 'The action to take.' },
+        amount: { type: 'number', description: 'Stake for "bet", an integer. Required for "bet", ignored otherwise.' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'casino_dealer',
+    description:
+      'Act as the dealer (庄家) on the Moonlit Table; only valid when the table shows you are the dealer and the hole card is already revealed. Actions: "hit" (draw one card; busting pays the player at once), "stand" (settle against the player total you can see).',
+    tags: ['act'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['hit', 'stand'], description: 'The action to take.' },
+      },
+      required: ['action'],
     },
   },
   {
@@ -121,7 +142,7 @@ export class CasinoWorld implements World {
         {
           id: 'table',
           title: '牌桌',
-          description: '同桌的牌桌:主人从这里开手、要牌、停牌;AI 侧的筹码与战绩同步显示。',
+          description: '与 AI 同桌对打 21 点:选庄、下注、要牌、停牌,绿呢桌面实时显示双方的牌。',
           getMethods: ['state', 'history'],
         },
       ],
@@ -165,87 +186,67 @@ export class CasinoWorld implements World {
 
   private async handleTool(name: string, args: Record<string, unknown>): Promise<string> {
     if (!this.state) this.state = loadTable(this.opts.dataDir) ?? newTable(this.opts.cfg.startChips);
-    if (name === 'casino_play') return this.playSeat('ai', args).text;
-    if (name === 'casino_history') return this.toolHistory(args);
+    if (name === 'casino_table') return this.toolTable(args);
+    if (name === 'casino_player') return this.toolPlayer(args);
+    if (name === 'casino_dealer') return this.toolDealer(args);
     if (name === 'casino_bank') return this.toolBank(args);
     return `未知的工具 ${name}。`;
   }
 
-  /** 一个座位的一手:AI 走工具循环,主人的调用来自面板。ok=false 时 text 是拒绝理由。 */
-  private playSeat(who: Seat, args: Record<string, unknown>): SeatPlayResult {
+  private toolTable(args: Record<string, unknown>): string {
     const state = this.state!;
-    const seat = who === 'ai' ? state.ai : state.owner;
-    const action = String(args.action ?? '');
-    if (action === 'deal') {
-      if (seat.hand) return { ok: false, text: `${who === 'ai' ? '你' : '主人'}上一手还没结算,先把它打完。` };
-      const bet = this.readBet(args.bet, seat);
-      if (typeof bet === 'string') return { ok: false, text: bet };
-      seat.chips -= bet;
-      seat.hand = {
-        cards: [this.draw(), this.draw()],
-        dealer: [this.draw(), this.draw()],
-        bet,
-        phase: 'acting',
-        doubled: false,
-      };
-      const player = handValue(seat.hand.cards);
-      if (!player.natural) {
-        this.save();
-        this.broadcast();
-        return { ok: true, text: this.actingReceipt(who, seat.hand) };
-      }
-      return { ok: true, text: this.settle(who) };
+    if (String(args.action ?? '') === 'history') {
+      const limit = Math.min(Math.max(Math.floor(Number(args.limit ?? 10)) || 10, 1), 50);
+      const lines = state.history.slice(0, limit).map((r, i) =>
+        `${i + 1}. 第${r.round}手 庄:${r.dealer === 'ai' ? '你' : '主人'} 押 ${r.bet},闲家 ${r.playerCards.join(' ')} 对 庄家 ${r.dealerCards.join(' ')},${OUTCOME_TEXT[r.outcome]},闲家净 ${r.delta >= 0 ? '+' : ''}${r.delta}`,
+      );
+      return lines.length ? `最近 ${lines.length} 手:\n${lines.join('\n')}` : '还没有记录。';
     }
-    const hand = seat.hand;
-    if (!hand) return { ok: false, text: '现在没有进行中的手,先 deal。' };
-    if (hand.phase !== 'acting') return { ok: false, text: '这一手已经结算了,先 deal 开新手。' };
+    const aiDealer = state.aiRole === 'dealer';
+    const roleText = state.aiRole === null ? '还没开局(主人在面板选庄后开始)' : aiDealer ? '你是庄家,主人是闲家' : '你是闲家,主人是庄家';
+    const phaseText: Record<Phase, string> = {
+      idle: '等开下一手',
+      betting: aiDealer ? '等主人(闲家)下注' : '等你(闲家)下注',
+      playerActing: aiDealer ? '等主人(闲家)要牌/停牌' : '等你(闲家)要牌/停牌/加倍',
+      dealerActing: aiDealer ? '等你(庄家)要牌/停牌' : '等主人(庄家)要牌/停牌',
+    };
+    const lines = [
+      `第 ${state.round} 手(${state.round === 0 ? '还没打过' : `上一手押 ${state.bet}`})。${roleText},${phaseText[state.phase]}。`,
+      `你的筹码:${state.ai.chips};主人筹码:${state.player.chips}(起始 ${this.opts.cfg.startChips},最小注 ${this.opts.cfg.minBet},单手上限 ${this.opts.cfg.maxBet})。`,
+    ];
+    if (state.phase === 'betting' || state.phase === 'playerActing' || state.phase === 'dealerActing') {
+      lines.push(`当前押注 ${state.bet}。`);
+      lines.push(`闲家手:${this.cards(state.playerCards)}(${state.playerCards.length ? String(handValue(state.playerCards).total) : '未发'})。`);
+      if (state.holeRevealed) {
+        lines.push(`庄家手(已亮):${this.cards(state.dealerCards)}(${handValue(state.dealerCards).total})。`);
+      } else if (state.dealerCards.length) {
+        lines.push(`庄家明牌:${formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })},暗牌未亮。`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  private toolPlayer(args: Record<string, unknown>): string {
+    const state = this.state!;
+    if (state.aiRole !== 'player') return state.aiRole === null ? '还没开局,主人在面板选庄后才有你的角色。' : '这一桌你是庄家,闲家动作轮不到你;等主人的牌。';
+    const result = this.playerAction(args);
+    return result.text;
+  }
+
+  private toolDealer(args: Record<string, unknown>): string {
+    const state = this.state!;
+    if (state.aiRole !== 'dealer') return '这一桌你是闲家,庄家动作轮不到你。';
+    if (state.phase !== 'dealerActing') return '现在不是庄家行动的阶段。';
+    const action = String(args.action ?? '');
     if (action === 'hit') {
-      hand.cards.push(this.draw());
-      if (handValue(hand.cards).total > 21) return { ok: true, text: this.settle(who) };
+      state.dealerCards.push(this.draw());
+      if (handValue(state.dealerCards).total > 21) return this.settle();
       this.save();
       this.broadcast();
-      return { ok: true, text: this.actingReceipt(who, hand) };
+      return `庄家手:${this.cards(state.dealerCards)}(${handValue(state.dealerCards).total})。继续 hit / stand。`;
     }
-    if (action === 'stand') {
-      return { ok: true, text: this.settle(who) };
-    }
-    if (action === 'double') {
-      if (hand.cards.length !== 2) return { ok: false, text: '只有首两张牌能加倍。' };
-      if (seat.chips < hand.bet) return { ok: false, text: `余额 ${seat.chips} 不够加倍(要 ${hand.bet})。` };
-      if (hand.bet >= this.opts.cfg.maxBet) return { ok: false, text: `加倍后会超过单手上限 ${this.opts.cfg.maxBet}。` };
-      seat.chips -= hand.bet;
-      hand.bet *= 2;
-      hand.doubled = true;
-      hand.cards.push(this.draw());
-      return { ok: true, text: this.settle(who) };
-    }
-    return { ok: false, text: `未知动作 ${action};取 deal / hit / stand / double。` };
-  }
-
-  /** 手还在进行时的回执:手牌、点数、庄家明牌、余额。 */
-  private actingReceipt(who: Seat, hand: NonNullable<SeatState['hand']>): string {
-    const seat = who === 'ai' ? this.state!.ai : this.state!.owner;
-    const value = handValue(hand.cards);
-    return [
-      who === 'ai' ? '手还在进行。' : '主人的手还在进行。',
-      `手牌:${this.cards(hand.cards)}(${value.total}${value.soft ? ' 软' : ''})。`,
-      `庄家明牌:${formatCard(hand.dealer[0] ?? { rank: 0, suit: 0 })},押注 ${hand.bet},余额 ${seat.chips}。`,
-      who === 'ai' ? '接下来用 casino_play 的 hit / stand / double。' : '',
-    ].filter(Boolean).join('\n');
-  }
-
-  private toolHistory(args: Record<string, unknown>): string {
-    const limit = Math.min(Math.max(Math.floor(Number(args.limit ?? 10)) || 10, 1), 50);
-    const state = this.state!;
-    const mine = state.history.filter((r) => r.who === 'ai');
-    const lines = mine.slice(0, limit).map((r, i) =>
-      `${i + 1}. ${r.at} 押 ${r.bet},${r.playerCards.join(' ')} 对 ${r.dealerCards.join(' ')},${OUTCOME_TEXT[r.outcome]},${r.delta >= 0 ? '+' : ''}${r.delta}`,
-    );
-    return [
-      `你的累计:${state.ai.wins} 胜 / ${state.ai.losses} 负 / ${state.ai.pushes} 平,净 ${state.ai.net >= 0 ? '+' : ''}${state.ai.net},破产 ${state.bankruptcies} 次。`,
-      `主人(同桌玩家)累计:${state.owner.wins} 胜 / ${state.owner.losses} 负 / ${state.owner.pushes} 平,余额 ${state.owner.chips}。`,
-      lines.length ? `最近 ${lines.length} 手:\n${lines.join('\n')}` : '还没有记录。',
-    ].join('\n');
+    if (action === 'stand') return this.settle();
+    return `未知动作 ${action};取 hit / stand。`;
   }
 
   private toolBank(args: Record<string, unknown>): string {
@@ -256,89 +257,241 @@ export class CasinoWorld implements World {
         return `救济只给破产的人:你的余额 ${seat.chips} 还够最小注 ${this.opts.cfg.minBet}。`;
       }
       seat.chips = this.opts.cfg.startChips;
-      state.bankruptcies++;
+      seat.bankruptcies++;
       this.save();
       this.broadcast();
-      return `救济金 ${this.opts.cfg.startChips} 已到账,余额 ${seat.chips};这是第 ${state.bankruptcies} 次破产。牌桌不记账外的东西。`;
+      return `救济金 ${this.opts.cfg.startChips} 已到账,余额 ${seat.chips};这是你第 ${seat.bankruptcies} 次破产。牌桌不记账外的东西。`;
     }
     return [
-      `余额:${seat.chips}(起始 ${this.opts.cfg.startChips},最小注 ${this.opts.cfg.minBet},单手上限 ${this.opts.cfg.maxBet})。`,
-      `累计:${seat.wins} 胜 / ${seat.losses} 负 / ${seat.pushes} 平,净 ${seat.net >= 0 ? '+' : ''}${seat.net},破产 ${state.bankruptcies} 次。`,
-      `主人余额:${state.owner.chips}。`,
+      `你的余额:${seat.chips}(累计 ${seat.wins} 胜 / ${seat.losses} 负 / ${seat.pushes} 平,净 ${seat.net >= 0 ? '+' : ''}${seat.net},破产 ${seat.bankruptcies} 次)。`,
+      `主人余额:${state.player.chips}(${state.player.wins} 胜 / ${state.player.losses} 负 / ${state.player.pushes} 平)。`,
     ].join('\n');
   }
 
-  // ---------------------------------------------------------------- 结算
+  // ---------------------------------------------------------------- 对局
 
-  /** 结算一个座位的手。AI 的结果进工具回执;主人的结果推 casino.result 事件给模型看。 */
-  private settle(who: Seat): string {
+  /** 面板或工具共用的闲家动作;调用方已保证角色与阶段(错误以 ok=false 返回)。 */
+  private playerAction(args: Record<string, unknown>): OpResult {
     const state = this.state!;
-    const seat = who === 'ai' ? state.ai : state.owner;
-    const hand = seat.hand;
-    if (!hand) return '没有进行中的手。';
-    const player = handValue(hand.cards);
-    const dealer = [...hand.dealer];
-    if (!player.natural) {
-      while (dealerShouldHit(dealer)) dealer.push(this.draw());
+    const action = String(args.action ?? '');
+    if (state.phase === 'idle') {
+      return { ok: false, text: '还没有进行中的手;在面板选庄开一手。' };
     }
-    hand.phase = 'done';
-    const house = handValue(dealer);
+    if (action === 'bet') {
+      if (state.phase !== 'betting') return { ok: false, text: '这一手已经开了,别重复下注。' };
+      const amount = this.readBet(args.amount);
+      if (typeof amount === 'string') return { ok: false, text: amount };
+      const settled = this.deal(amount);
+      this.save();
+      this.broadcast();
+      if (settled) return { ok: true, text: settled };
+      return { ok: true, text: this.playerActingReceipt() };
+    }
+    if (state.phase !== 'playerActing') {
+      return { ok: false, text: state.phase === 'dealerActing' ? '闲家的牌已经停了,现在是庄家行动。' : '现在没有进行中的手。' };
+    }
+    if (action === 'hit') {
+      state.playerCards.push(this.draw());
+      if (handValue(state.playerCards).total > 21) return { ok: true, text: this.settle() };
+      this.save();
+      this.broadcast();
+      return { ok: true, text: this.playerActingReceipt() };
+    }
+    if (action === 'stand') {
+      this.toDealerActing();
+      if (state.aiRole === 'dealer') {
+        this.save();
+        this.notifyDealerTurn();
+        this.broadcast();
+      } else {
+        this.save();
+        this.broadcast();
+      }
+      return { ok: true, text: this.dealerActingReceipt() };
+    }
+    if (action === 'double') {
+      if (state.playerCards.length !== 2) return { ok: false, text: '只有首两张牌能加倍。' };
+      const doubled = state.bet * 2;
+      if (doubled > this.opts.cfg.maxBet) return { ok: false, text: `加倍后会超过单手上限 ${this.opts.cfg.maxBet}。` };
+      if (doubled > Math.min(state.player.chips, state.ai.chips)) {
+        return { ok: false, text: `加倍到 ${doubled} 超出了某一方赔得起的余额(你的 ${state.player.chips} / 对方 ${state.ai.chips})。` };
+      }
+      state.bet = doubled;
+      state.doubled = true;
+      state.playerCards.push(this.draw());
+      if (handValue(state.playerCards).total > 21) return { ok: true, text: this.settle() };
+      this.toDealerActing();
+      if (state.aiRole === 'dealer') {
+        this.save();
+        this.notifyDealerTurn();
+        this.broadcast();
+      } else {
+        this.save();
+        this.broadcast();
+      }
+      return { ok: true, text: this.dealerActingReceipt() };
+    }
+    return { ok: false, text: `未知动作 ${action};取 bet / hit / stand / double。` };
+  }
+
+  /** 发一手牌:闲家两张明牌,庄家一亮一暗;自然黑杰克立即结算并返回结算文本。 */
+  private deal(bet: number): string | null {
+    const state = this.state!;
+    state.bet = bet;
+    state.playerCards = [this.draw(), this.draw()];
+    state.dealerCards = [this.draw(), this.draw()];
+    state.holeRevealed = false;
+    state.doubled = false;
+    const playerNatural = handValue(state.playerCards).natural;
+    const dealerNatural = handValue(state.dealerCards).natural;
+    if (playerNatural || dealerNatural) {
+      state.holeRevealed = true;
+      return this.settle();
+    }
+    state.phase = 'playerActing';
+    return null;
+  }
+
+  /** 闲家停牌(或加倍后未爆):亮暗牌,进入庄家阶段。 */
+  private toDealerActing(): void {
+    const state = this.state!;
+    state.holeRevealed = true;
+    state.phase = 'dealerActing';
+  }
+
+  /** 结算:比点、转账、记档、推事件、回 idle。 */
+  private settle(): string {
+    const state = this.state!;
+    const player = handValue(state.playerCards);
+    const dealer = handValue(state.dealerCards);
     let outcome: Outcome;
     let delta: number;
     if (player.total > 21) {
       outcome = 'bust';
-      delta = -hand.bet;
-    } else if (player.natural && !house.natural) {
-      outcome = 'blackjack';
-      delta = Math.round(hand.bet * 1.5);
-      seat.chips += hand.bet + delta;
-    } else if (house.natural && !player.natural) {
-      outcome = 'lose';
-      delta = -hand.bet;
-    } else if (house.total > 21 || player.total > house.total) {
+      delta = -state.bet;
+    } else if (dealer.total > 21) {
       outcome = 'win';
-      delta = hand.bet;
-      seat.chips += hand.bet * 2;
-    } else if (player.total === house.total) {
+      delta = state.bet;
+    } else if (player.natural && dealer.natural) {
       outcome = 'push';
       delta = 0;
-      seat.chips += hand.bet;
-    } else {
+    } else if (player.natural) {
+      outcome = 'blackjack';
+      delta = Math.round(state.bet * 1.5);
+    } else if (dealer.natural) {
       outcome = 'lose';
-      delta = -hand.bet;
+      delta = -state.bet;
+    } else if (player.total > dealer.total) {
+      outcome = 'win';
+      delta = state.bet;
+    } else if (player.total < dealer.total) {
+      outcome = 'lose';
+      delta = -state.bet;
+    } else {
+      outcome = 'push';
+      delta = 0;
     }
-    seat.net += delta;
-    if (outcome === 'win' || outcome === 'blackjack') seat.wins++;
-    else if (outcome === 'push') seat.pushes++;
-    else seat.losses++;
-    recordHand(state, {
-      who,
-      bet: hand.bet,
-      playerCards: formatHand(hand.cards),
-      dealerCards: formatHand(dealer),
+    const playerIsIdler = state.aiRole === 'player';
+    const idlerSeat: SeatState = playerIsIdler ? state.ai : state.player;
+    const dealerSeat: SeatState = playerIsIdler ? state.player : state.ai;
+    idlerSeat.chips += delta;
+    idlerSeat.net += delta;
+    dealerSeat.chips -= delta;
+    dealerSeat.net -= delta;
+    if (outcome === 'win' || outcome === 'blackjack') {
+      idlerSeat.wins++;
+      dealerSeat.losses++;
+    } else if (outcome === 'push') {
+      idlerSeat.pushes++;
+      dealerSeat.pushes++;
+    } else {
+      idlerSeat.losses++;
+      dealerSeat.wins++;
+    }
+    const record: HandRecord = {
+      dealer: state.aiRole === 'dealer' ? 'ai' : 'player',
+      round: state.round,
+      bet: state.bet,
+      playerCards: formatHand(state.playerCards),
+      dealerCards: formatHand(state.dealerCards),
       outcome,
       delta,
       at: nowIso(this.opts.timezone),
-    });
-    seat.hand = null;
+    };
+    recordHand(state, record);
+    state.phase = 'idle';
+    state.round++;
+    state.bet = 0;
+    state.playerCards = [];
+    state.dealerCards = [];
+    state.holeRevealed = false;
+    state.doubled = false;
     this.save();
     this.broadcast();
     const line = [
-      who === 'ai' ? '你的手' : '主人的手',
-      `${this.cards(hand.cards)}(${player.total})对庄家 ${this.cards(dealer)}(${house.total}${house.total > 21 ? ',爆' : ''})。`,
-      `结果:${OUTCOME_TEXT[outcome]},${delta >= 0 ? '+' : ''}${delta},余额 ${seat.chips}。`,
+      `第 ${record.round} 手结算(庄:${record.dealer === 'ai' ? '你' : '主人'},押 ${record.bet})。`,
+      `闲家 ${record.playerCards.join(' ')} 对 庄家 ${record.dealerCards.join(' ')}(${player.total} 对 ${dealer.total}${dealer.total > 21 ? ',庄爆' : ''}${player.total > 21 ? ',闲爆' : ''})。`,
+      `闲家${OUTCOME_TEXT[outcome]},净 ${delta >= 0 ? '+' : ''}${delta}。你的筹码 ${state.ai.chips},主人 ${state.player.chips}。`,
     ].join(' ');
-    if (who === 'owner') {
-      void this.host?.pushEvent({
-        type: 'casino.result',
-        ts: nowIso(this.opts.timezone),
-        source: this.id,
-        origin: 'internal',
-        senderKey: this.id,
-        text: line,
-      }, { trigger: 'debounce' });
-    }
+    void this.host?.pushEvent({
+      type: 'casino.result',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: line,
+    }, { trigger: 'debounce' });
     return line;
+  }
+
+  /** 闲家视角的手进行中回执。 */
+  private playerActingReceipt(): string {
+    const state = this.state!;
+    const value = handValue(state.playerCards);
+    const aiIsIdler = state.aiRole === 'player';
+    const ownChips = aiIsIdler ? state.ai.chips : state.player.chips;
+    return [
+      aiIsIdler ? '手还在进行。' : '主人的手还在进行。',
+      `闲家手:${this.cards(state.playerCards)}(${value.total}${value.soft ? ' 软' : ''}),押注 ${state.bet}${state.doubled ? '(已加倍)' : ''}。`,
+      `庄家明牌:${formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })},暗牌未亮。${aiIsIdler ? `你的余额 ${ownChips}。接下来用 casino_player 的 hit / stand / double。` : ''}`,
+    ].join(' ');
+  }
+
+  /** 庄家阶段回执:暗牌已亮,庄家看得到闲家点数。 */
+  private dealerActingReceipt(): string {
+    const state = this.state!;
+    const dealerTotal = handValue(state.dealerCards).total;
+    const playerTotal = handValue(state.playerCards).total;
+    const aiIsDealer = state.aiRole === 'dealer';
+    return [
+      aiIsDealer ? '轮到你做庄(暗牌已亮)。' : '主人做庄(暗牌已亮)。',
+      `庄家手:${this.cards(state.dealerCards)}(${dealerTotal});闲家停在 ${playerTotal} 点,押注 ${state.bet}${state.doubled ? '(已加倍)' : ''}。`,
+      aiIsDealer ? `用 casino_dealer 的 hit / stand;爆牌按押注赔付。你的银行 ${state.ai.chips}。` : '',
+    ].filter(Boolean).join(' ');
+  }
+
+  /** 轮到 AI 了:下注或做庄决定,推 flush 事件。 */
+  private notifyBettingTurn(): void {
+    const state = this.state!;
+    void this.host?.pushEvent({
+      type: 'casino.turn',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: `轮到你下注。你是闲家,主人坐庄。最小注 ${this.opts.cfg.minBet},单手上限 ${this.opts.cfg.maxBet},你的余额 ${state.ai.chips},庄家银行 ${state.player.chips};押注不能超过两边较小的那个。用 casino_player 的 bet 开手。`,
+    }, { trigger: 'flush' });
+  }
+
+  private notifyDealerTurn(): void {
+    void this.host?.pushEvent({
+      type: 'casino.turn',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: `轮到你做庄。${this.dealerActingReceipt()}`,
+    }, { trigger: 'flush' });
   }
 
   // ---------------------------------------------------------------- 面板
@@ -346,13 +499,74 @@ export class CasinoWorld implements World {
   private async handleInvoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
     if (panel !== 'table') throw new Error(`unknown panel ${panel}`);
     if (!this.state) this.state = loadTable(this.opts.dataDir) ?? newTable(this.opts.cfg.startChips);
-    if (method === 'state') return this.ownerSnapshot();
+    if (method === 'state') return this.snapshot();
     if (method === 'history') return { history: this.state.history };
     if (method !== 'action') throw new Error(`unknown method ${method}`);
-    const arg = (args[0] ?? {}) as { action?: string; bet?: number };
-    const result = this.playSeat('owner', { action: String(arg.action ?? ''), bet: arg.bet });
-    if (!result.ok) throw new Error(result.text);
-    return this.ownerSnapshot();
+    const arg = (args[0] ?? {}) as Record<string, unknown>;
+    const action = String(arg.action ?? '');
+    const state = this.state;
+
+    if (action === 'newgame') {
+      const dealer = String(arg.dealer ?? '');
+      if (dealer !== 'ai' && dealer !== 'player') throw new Error('庄家要写 ai 或 player。');
+      if (state.phase !== 'idle') throw new Error('这一手还没打完。');
+      state.aiRole = dealer === 'ai' ? 'dealer' : 'player';
+      state.round++;
+      state.phase = 'betting';
+      this.save();
+      this.broadcast();
+      if (state.aiRole === 'player') this.notifyBettingTurn();
+      return this.snapshot();
+    }
+    if (action === 'relief') {
+      if (state.player.chips >= this.opts.cfg.minBet) throw new Error('救济只给破产的人。');
+      state.player.chips = this.opts.cfg.startChips;
+      state.player.bankruptcies++;
+      this.save();
+      this.broadcast();
+      return this.snapshot();
+    }
+    if (action === 'nudge') {
+      if (state.phase === 'betting' && state.aiRole === 'player') {
+        this.notifyBettingTurn();
+        return this.snapshot();
+      }
+      if (state.phase === 'dealerActing' && state.aiRole === 'dealer') {
+        this.notifyDealerTurn();
+        return this.snapshot();
+      }
+      throw new Error('现在没有在等 AI。');
+    }
+
+    if (action === 'bet') {
+      if (state.aiRole !== 'dealer') throw new Error('你现在是庄家,不用下注;等闲家(自动)下注。');
+      const result = this.playerAction({ action: 'bet', amount: arg.amount });
+      if (!result.ok) throw new Error(result.text);
+      return this.snapshot();
+    }
+    if (action === 'hit' || action === 'stand' || action === 'double') {
+      if (state.aiRole !== 'dealer') throw new Error('闲家是自动的(AI),你做庄时不用替它出牌。');
+      const result = this.playerAction({ action });
+      if (!result.ok) throw new Error(result.text);
+      return this.snapshot();
+    }
+    if (action === 'dealer_hit' || action === 'dealer_stand') {
+      if (state.aiRole !== 'player') throw new Error('这一手庄家是 AI,轮不到你做庄。');
+      if (state.phase !== 'dealerActing') throw new Error('现在不是庄家行动的阶段。');
+      if (action === 'dealer_hit') {
+        state.dealerCards.push(this.draw());
+        if (handValue(state.dealerCards).total > 21) {
+          this.settle();
+          return this.snapshot();
+        }
+        this.save();
+        this.broadcast();
+        return this.snapshot();
+      }
+      this.settle();
+      return this.snapshot();
+    }
+    throw new Error(`未知动作 ${action}`);
   }
 
   private handleStream(_panel: string, socket: WorldStreamSocket): void {
@@ -360,59 +574,62 @@ export class CasinoWorld implements World {
     socket.onClose(() => {
       this.sockets.delete(socket);
     });
-    socket.send(JSON.stringify(this.ownerSnapshot()));
+    socket.send(JSON.stringify(this.snapshot()));
   }
 
   private broadcast(): void {
     if (!this.sockets.size) return;
-    const frame = JSON.stringify(this.ownerSnapshot());
+    const frame = JSON.stringify(this.snapshot());
     for (const socket of this.sockets) socket.send(frame);
   }
 
-  /** 面板视图:AI 与主人的手牌全亮,各手的庄家暗牌在 acting 时扣下。 */
-  private ownerSnapshot(): unknown {
+  /** 面板视图:闲家牌全亮;庄家暗牌只在 dealerActing 与结算后亮。 */
+  private snapshot(): unknown {
     const state = this.state!;
-    const seatView = (who: Seat, seat: SeatState) => {
-      const hand = seat.hand;
-      return {
-        who,
-        chips: seat.chips,
-        wins: seat.wins,
-        losses: seat.losses,
-        pushes: seat.pushes,
-        net: seat.net,
-        hand: hand
-          ? {
-              cards: formatHand(hand.cards),
-              total: handValue(hand.cards).total,
-              bet: hand.bet,
-              phase: hand.phase,
-              doubled: hand.doubled,
-              dealerUpcard: formatCard(hand.dealer[0] ?? { rank: 0, suit: 0 }),
-            }
-          : null,
-      };
-    };
+    const dealerVisible = state.holeRevealed ? state.dealerCards : state.dealerCards.slice(0, 1);
+    const seatView = (seat: SeatState, role: Role | null) => ({
+      chips: seat.chips,
+      wins: seat.wins,
+      losses: seat.losses,
+      pushes: seat.pushes,
+      net: seat.net,
+      bankruptcies: seat.bankruptcies,
+      role,
+    });
     return {
       version: state.version,
+      phase: state.phase,
+      round: state.round,
+      aiRole: state.aiRole,
+      bet: state.bet,
+      doubled: state.doubled,
+      holeRevealed: state.holeRevealed,
+      playerCards: formatHand(state.playerCards),
+      playerTotal: state.playerCards.length ? handValue(state.playerCards).total : null,
+      dealerCards: formatHand(dealerVisible),
+      dealerTotal: dealerVisible.length ? handValue(dealerVisible).total : null,
+      holeCount: state.dealerCards.length - dealerVisible.length,
+      ai: seatView(state.ai, state.aiRole === null ? null : state.aiRole),
+      player: seatView(state.player, state.aiRole === null ? null : state.aiRole === 'dealer' ? 'player' : 'dealer'),
       minBet: this.opts.cfg.minBet,
       maxBet: this.opts.cfg.maxBet,
       startChips: this.opts.cfg.startChips,
-      ai: seatView('ai', state.ai),
-      owner: seatView('owner', state.owner),
-      bankruptcies: state.bankruptcies,
+      lastResult: state.history[0] ?? null,
       history: state.history.slice(0, 10),
     };
   }
 
   // ---------------------------------------------------------------- 底层
 
-  private readBet(raw: unknown, seat: SeatState): number | string {
+  /** 校验下注:整数、范围内、不超过闲家与庄家余额的较小值。 */
+  private readBet(raw: unknown): number | string {
     const bet = Math.floor(Number(raw));
     if (!Number.isFinite(bet)) return `下注要是整数,收到 ${JSON.stringify(raw ?? null)}。`;
+    const state = this.state!;
     if (bet < this.opts.cfg.minBet) return `最小下注 ${this.opts.cfg.minBet}。`;
     if (bet > this.opts.cfg.maxBet) return `单手上限 ${this.opts.cfg.maxBet}。`;
-    if (bet > seat.chips) return `余额 ${seat.chips},押不起 ${bet}。`;
+    const backing = Math.min(state.player.chips, state.ai.chips);
+    if (bet > backing) return `押注不能超过双方余额的较小值 ${backing}(你 ${state.player.chips} / 对方 ${state.ai.chips})。`;
     return bet;
   }
 
