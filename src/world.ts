@@ -425,6 +425,8 @@ export class CasinoWorld implements World {
     }
     if (upcard.rank === 1) {
       state.phase = 'insurance';
+      // AI 当闲家时必须被叫到,否则它会卡在保险阶段(催一下是兜底,不是正常路径)。
+      if (state.aiRole === 'player') this.notifyInsuranceTurn();
       return null;
     }
     state.phase = 'playerActing';
@@ -564,7 +566,7 @@ export class CasinoWorld implements World {
     return line;
   }
 
-  /** 闲家手进行中的回执:每手的牌与点数、庄家明牌、押注与余额。 */
+  /** 闲家手进行中的回执:每手的牌与点数、庄家明牌、押注与余额;保险阶段附决定提示。 */
   private actingReceipt(): string {
     const state = this.state!;
     const aiIsIdler = state.aiRole === 'player';
@@ -574,10 +576,14 @@ export class CasinoWorld implements World {
       const value = handValue(hand.cards);
       return `${mark}闲家手:${this.cards(hand.cards)}(${value.total}${value.soft ? ' 软' : ''}),押 ${hand.bet}${hand.doubled ? '(已加倍)' : ''}${hand.stood ? '(已停)' : ''}`;
     });
+    const insuranceNote = state.phase === 'insurance'
+      ? `庄家亮 A:先用 casino_player 的 insurance 决定保险(amount:0 为不买,最多 ${Math.floor(state.bet / 2)})。`
+      : '';
     return [
       `${aiIsIdler ? '手还在进行' : '主人的手还在进行'}。`,
       ...hands,
       `庄家明牌:${formatCard(state.dealerCards[0] ?? { rank: 0, suit: 0 })},暗牌未翻。底注 ${state.bet}${state.insurance > 0 ? `,保险 ${state.insurance}` : ''},你的余额 ${ownChips}。`,
+      insuranceNote,
       aiIsIdler ? '接下来用 casino_player 继续。' : '',
     ].filter(Boolean).join('\n');
   }

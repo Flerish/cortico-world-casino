@@ -235,6 +235,19 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.stop();
   });
 
+  it('AI 当闲家遇庄家明 A:发牌后立即收到保险决定通知(不靠催一下)', async () => {
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 1), card(6, 0), card(13, 0)] });
+    const world = worldWith(zeroRng);
+    const host = new FakeHost();
+    await world.start(host);
+    await act(world, 'newgame', { dealer: 'player' });
+    await tool(world, 'casino_player', { action: 'bet', amount: 50 });
+    const types = host.events.map((e) => e.type);
+    expect(types).toEqual(['casino.turn', 'casino.turn']);
+    expect(host.events[1]!.text).toContain('保险');
+    await world.stop();
+  });
+
   it('保险:庄家亮 A 先决定;买后被收走则并入结算', async () => {
     rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 1), card(6, 0), card(13, 0)] });
     const world = worldWith(zeroRng);
