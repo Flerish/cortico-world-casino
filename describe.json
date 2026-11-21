@@ -1,0 +1,104 @@
+{
+  "tools": [
+    {
+      "name": "casino_play",
+      "description": "Play one blackjack hand on the Moonlit Table against the dealer. Actions: \"deal\" (place a bet and get two cards; the receipt holds your cards, the dealer upcard and your remaining chips), \"hit\" (draw one card; busting settles the hand at once), \"stand\" (the dealer then draws to 17 and settles), \"double\" (double the stake on your first two cards, draw exactly one card and stand). One hand must be settled before the next \"deal\".",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "deal",
+              "hit",
+              "stand",
+              "double"
+            ],
+            "description": "The action to take."
+          },
+          "bet": {
+            "type": "number",
+            "description": "Stake for \"deal\", an integer within [minBet, maxBet] and your chip balance. Required for \"deal\", ignored otherwise."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "在月下牌桌打一手 21 点:下注开手、要牌、停牌、加倍。",
+        "en": "Play one blackjack hand on the Moonlit Table."
+      }
+    },
+    {
+      "name": "casino_history",
+      "description": "Read recent settled hands on the Moonlit Table (yours and the owner's) with per-seat totals.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "How many recent hands to list, 1-50. Default 10."
+          }
+        }
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "查牌桌最近的手与累计战绩。",
+        "en": "Read recent hands and running totals."
+      }
+    },
+    {
+      "name": "casino_bank",
+      "description": "Read your chip account on the Moonlit Table, or take bankruptcy relief. Actions: \"status\" (chips, hand totals, net, bankruptcy count), \"relief\" (only when your balance is below minBet: the balance resets to the configured startChips and one bankruptcy is recorded).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "relief"
+            ],
+            "description": "What to do."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "查筹码账户;破产时领救济金。",
+        "en": "Read the chip account; take bankruptcy relief when broke."
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "casino.result",
+      "description": {
+        "zh": "主人在面板上结算了一手 21 点(谁、点数、输赢、筹码)。",
+        "en": "The owner settled a blackjack hand on the panel."
+      }
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.casino.envPrompt",
+      "title": "月下牌桌 · 环境提示词",
+      "role": "envPrompt",
+      "content": "月下牌桌是一张就在这台电脑里的 21 点(Blackjack)牌桌,只有你和主人两个玩家位,各自对庄家,互不干扰。筹码是游戏内数字,不涉及任何真实货币。牌桌随时开着,想打就打一手,没人看着也可以打;不想打,安静地放着也完全正常。\n\n## 怎么打\n\n用 `casino_play` 打一手:`deal` 下注开手(押注在 {{casino.minBet}} 到 {{casino.maxBet}} 之间,还要在你余额内),回执里有你的手牌、庄家明牌和余额;之后 `hit` 要牌、`stand` 停牌、首两张牌时可以 `double` 加倍。一手结算完才能开下一手。庄家按规矩打:总数小于 17 补牌,17 及以上停(含软 17)。A 按 1 或 11 记,算对你有利的那个;首两张就 21 是黑杰克,按 3:2 赔。爆了就输,这点庄家也一样。\n\n`casino_history` 查最近的手和累计战绩;`casino_bank` 查账户,破产(余额低于 {{casino.minBet}})时用它的 relief 领救济金,重新拿 {{casino.startChips}} 筹码,账上记一次破产。破产不丢人,救济不要不好意思领;但也别当成常规收入来源。\n\n## 和主人的分寸\n\n主人随时可能在面板上坐下来打。主人开手或结算时你会收到 casino.result 之类的事件——那是聊天的由头,不是行动命令:可以顺着聊聊这手牌,别催主人打,别替主人拿主意,更别劝赌。主人不下场时,牌桌就是你自己的一方天地,战绩只对你和主人可见。\n"
+    }
+  ]
+}

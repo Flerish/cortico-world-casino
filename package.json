@@ -1,0 +1,49 @@
+{
+  "name": "cortico-world-casino",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Moonlit Table: a local blackjack table the bot can sit at by itself, with the owner welcome to take a seat on the same table through the WebUI panel. Chips are game numbers only.",
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "blackjack",
+    "cards",
+    "game",
+    "local"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.28.6",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "月下牌桌",
+    "webUiClient": "dist/webui.js",
+    "tags": [],
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "scripts",
+    "README.md",
+    "CHANGELOG.md",
+    "describe.json"
+  ],
+  "scripts": {
+    "build:webui": "node scripts/build-webui.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webui.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "cortico": "^0.2.17",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
