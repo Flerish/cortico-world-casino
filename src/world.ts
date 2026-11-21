@@ -282,7 +282,8 @@ export class CasinoWorld implements World {
       if (!Number.isFinite(amount) || amount < 0) return { ok: false, text: '保险金额要是非负整数,0 表示不买。' };
       const maxIns = Math.floor(state.bet / 2);
       if (amount > maxIns) return { ok: false, text: `保险最多 ${maxIns}(底注的一半)。` };
-      if (amount > state.ai.chips) return { ok: false, text: `余额 ${state.ai.chips} 付不起 ${amount} 的保险。` };
+      const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
+      if (amount > idlerChips) return { ok: false, text: `余额 ${idlerChips} 付不起 ${amount} 的保险。` };
       state.insurance = amount;
       this.notifyAction(amount > 0 ? `主人买保险 ${amount}。` : `主人看了眼庄家的明牌 A,决定不买保险。`);
       return await this.resolveInsurance();
@@ -311,8 +312,9 @@ export class CasinoWorld implements World {
       const doubled = hand.bet * 2;
       if (doubled > this.opts.cfg.maxBet) return { ok: false, text: `加倍后会超过单手上限 ${this.opts.cfg.maxBet}。` };
       const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
+      const dealerChips = state.aiRole === 'player' ? state.player.chips : state.ai.chips;
       const otherBets = state.hands.reduce((sum, h) => sum + h.bet, 0) - hand.bet;
-      if (doubled + otherBets > Math.min(idlerChips, state.ai.chips)) {
+      if (doubled + otherBets > Math.min(idlerChips, dealerChips)) {
         return { ok: false, text: `加倍后总注 ${doubled + otherBets} 超出了某一方赔得起的余额。` };
       }
       hand.bet = doubled;
@@ -414,6 +416,8 @@ export class CasinoWorld implements World {
     const upcard = state.dealerCards[0]!;
     if (idlerNatural || (upcard.rank > 9 && dealerNatural)) {
       state.holeRevealed = true;
+      // 先离开 betting 阶段:停顿期间重复下注会导致双重结算。
+      state.phase = 'playerActing';
       this.save();
       this.broadcast();
       await this.sleep();
@@ -435,6 +439,8 @@ export class CasinoWorld implements World {
     } else if (state.insurance > 0) {
       state.insuranceOutcome = 'lost';
     }
+    // 先离开 insurance 阶段:停顿期间重复决定会导致双重结算。
+    state.phase = 'playerActing';
     if (handValue(state.dealerCards).natural) {
       state.holeRevealed = true;
       this.save();
@@ -442,7 +448,6 @@ export class CasinoWorld implements World {
       await this.sleep();
       return { ok: true, text: this.settle() };
     }
-    state.phase = 'playerActing';
     this.save();
     this.broadcast();
     return { ok: true, text: this.actingReceipt() };
@@ -642,6 +647,7 @@ export class CasinoWorld implements World {
       return this.snapshot();
     }
     if (action === 'resetmatch') {
+      if (state.dealerActing) throw new Error('庄家正在按规则打牌,等这一手结算完再归档重开。');
       this.recordMatchAndReset();
       return this.snapshot();
     }

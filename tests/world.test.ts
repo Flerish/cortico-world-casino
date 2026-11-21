@@ -337,6 +337,17 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.stop();
   });
 
+  it('加倍校验看的是庄家银行:AI 闲家加倍不能超过玩家(庄)赔得起的数', async () => {
+    rigTable({ playerChips: 20 }); // 玩家坐庄,银行只有 20
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'player' });
+    await tool(world, 'casino_player', { action: 'bet', amount: 15 });
+    const text = await tool(world, 'casino_player', { action: 'double' });
+    expect(text).toContain('赔得起');
+    await world.stop();
+  });
+
   it('下注校验:超上限与超双方余额都拒绝', async () => {
     rigTable({ playerChips: 15 });
     const world = worldWith(zeroRng);
