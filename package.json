@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-casino",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
-  "description": "Moonlit Table: a local blackjack table the bot can sit at by itself, with the owner welcome to take a seat on the same table through the WebUI panel. Chips are game numbers only.",
+  "description": "月下牌桌:一张就在电脑里的标准 21 点牌桌,与你的 AI 同桌对打——选庄、下注、要牌、停牌、分牌、保险,绿呢桌面实时显示双方的牌;筹码是游戏内数字,不涉及真钱。",
   "license": "MIT",
   "keywords": [
     "cortico-world",
