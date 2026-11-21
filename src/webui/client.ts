@@ -47,6 +47,7 @@ interface Snapshot {
   bet: number;
   insurance: number;
   holeRevealed: boolean;
+  dealerActing: boolean;
   hands: HandView[];
   activeHand: number;
   dealerCards: string[];
@@ -438,7 +439,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const banner2 = el('div', 'banner wait');
     banner2.append(el('span', 'banner-text', '等 AI 决定保险…'));
     wrap.append(banner2);
-  } else if (state.phase === 'playerActing' && playerIsIdler) {
+  } else if (state.phase === 'playerActing' && playerIsIdler && !state.dealerActing) {
     const active = state.hands[state.activeHand];
     const singleFresh = state.hands.length === 1 && (active?.cards.length ?? 0) === 2;
     const canSplit = singleFresh
@@ -465,6 +466,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     surrender.addEventListener('click', () => void send(ctx, 'surrender'), { signal: ctx.signal });
     row.append(hit, stand, dbl, split, surrender);
     wrap.append(row);
+  } else if (state.phase === 'playerActing' && state.dealerActing) {
+    const banner2 = el('div', 'banner wait');
+    banner2.append(el('span', 'banner-text', dealerIsAi ? '庄家(AI)按规则打牌中…' : '你的庄家手按规则打牌中…'));
+    wrap.append(banner2);
   } else if (state.phase === 'playerActing') {
     const banner2 = el('div', 'banner wait');
     banner2.append(el('span', 'banner-text', 'AI 出牌中…'));

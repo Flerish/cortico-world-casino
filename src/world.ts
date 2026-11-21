@@ -162,6 +162,10 @@ export class CasinoWorld implements World {
       this.state = newTable(this.opts.cfg.startChips);
       this.save();
     }
+    if (this.state.dealerActing) {
+      // 进程在庄家打牌途中重启:把这一手按规则打完再交给面板。
+      await this.dealerPlayAndSettle();
+    }
   }
 
   async stop(): Promise<void> {
@@ -222,10 +226,10 @@ export class CasinoWorld implements World {
     return lines.join('\n');
   }
 
-  private toolPlayer(args: Record<string, unknown>): string {
+  private async toolPlayer(args: Record<string, unknown>): Promise<string> {
     const state = this.state!;
     if (state.aiRole !== 'player') return state.aiRole === null ? '还没开局,主人在面板选庄后才有你的角色。' : '这一桌你是庄家(机械银行,引擎按规则替你打),没有闲家动作可做;主人的牌就是你的牌。';
-    const result = this.playerAction(args);
+    const result = await this.playerAction(args);
     return result.text;
   }
 
@@ -250,8 +254,8 @@ export class CasinoWorld implements World {
 
   // ---------------------------------------------------------------- 对局
 
-  /** 闲家动作(AI 经工具、玩家经面板都汇到这里)。 */
-  private playerAction(args: Record<string, unknown>): OpResult {
+  /** 闲家动作(AI 经工具、玩家经面板都汇到这里)。庄家自动打牌时逐张停顿,让面板看得清。 */
+  private async playerAction(args: Record<string, unknown>): Promise<OpResult> {
     const state = this.state!;
     const action = String(args.action ?? '');
     if (state.phase === 'idle') {
@@ -261,7 +265,7 @@ export class CasinoWorld implements World {
       if (state.phase !== 'betting') return { ok: false, text: '这一手已经开了,别重复下注。' };
       const amount = this.readBet(args.amount);
       if (typeof amount === 'string') return { ok: false, text: amount };
-      const settled = this.deal(amount);
+      const settled = await this.deal(amount);
       this.save();
       this.broadcast();
       if (settled) return { ok: true, text: settled };
@@ -275,20 +279,23 @@ export class CasinoWorld implements World {
       if (amount > maxIns) return { ok: false, text: `保险最多 ${maxIns}(底注的一半)。` };
       if (amount > state.ai.chips) return { ok: false, text: `余额 ${state.ai.chips} 付不起 ${amount} 的保险。` };
       state.insurance = amount;
-      return this.resolveInsurance();
+      return await this.resolveInsurance();
     }
     if (state.phase !== 'playerActing') {
       return { ok: false, text: state.phase === 'betting' ? '先下注,才有手可打。' : state.phase === 'insurance' ? '先决定保险(或声明不买),再打牌。' : '现在没有进行中的手。' };
+    }
+    if (state.dealerActing) {
+      return { ok: false, text: '庄家正在按规则打牌,稍等结算。' };
     }
     const hand = state.hands[state.activeHand]!;
     if (action === 'hit') {
       hand.cards.push(this.draw());
       if (handValue(hand.cards).total > 21) hand.stood = true;
-      return this.advanceOrPlay(hand);
+      return await this.advanceOrPlay(hand);
     }
     if (action === 'stand') {
       hand.stood = true;
-      return this.advanceOrPlay(hand);
+      return await this.advanceOrPlay(hand);
     }
     if (action === 'double') {
       if (hand.cards.length !== 2) return { ok: false, text: '只有一手的前两张牌能加倍。' };
@@ -303,7 +310,7 @@ export class CasinoWorld implements World {
       hand.doubled = true;
       hand.cards.push(this.draw());
       hand.stood = true;
-      return this.advanceOrPlay(hand);
+      return await this.advanceOrPlay(hand);
     }
     if (action === 'split') {
       if (state.hands.length > 1) return { ok: false, text: '这只允许分一次(两手)。' };
@@ -327,7 +334,7 @@ export class CasinoWorld implements World {
       state.hands = [hand0, hand1];
       state.activeHand = 0;
       if (hand0.stood && hand1.stood) {
-        return { ok: true, text: this.dealerPlayAndSettle() };
+        return { ok: true, text: await this.dealerPlayAndSettle() };
       }
       this.save();
       this.broadcast();
@@ -345,7 +352,7 @@ export class CasinoWorld implements World {
   }
 
   /** 当前手打完(停/爆/加倍):看后面还有没有手;没有就轮到庄家——但全爆时庄家直接收注,不补牌。 */
-  private advanceOrPlay(hand: IdlerHand): OpResult {
+  private async advanceOrPlay(hand: IdlerHand): Promise<OpResult> {
     const state = this.state!;
     if (handValue(hand.cards).total > 21) hand.stood = true;
     const next = state.hands.findIndex((h) => !h.stood);
@@ -356,13 +363,13 @@ export class CasinoWorld implements World {
       return { ok: true, text: this.actingReceipt() };
     }
     const anyLive = state.hands.some((h) => handValue(h.cards).total <= 21 && h.outcome !== 'surrender');
-    if (anyLive) return { ok: true, text: this.dealerPlayAndSettle() };
+    if (anyLive) return { ok: true, text: await this.dealerPlayAndSettle() };
     state.holeRevealed = true;
     return { ok: true, text: this.settle() };
   }
 
   /** 发一手牌:闲家两张明牌,庄家一亮一暗。 */
-  private deal(bet: number): string | null {
+  private async deal(bet: number): Promise<string | null> {
     const state = this.state!;
     state.bet = bet;
     state.insurance = 0;
@@ -376,6 +383,9 @@ export class CasinoWorld implements World {
     const upcard = state.dealerCards[0]!;
     if (idlerNatural || (upcard.rank > 9 && dealerNatural)) {
       state.holeRevealed = true;
+      this.save();
+      this.broadcast();
+      await this.sleep();
       return this.settle();
     }
     if (upcard.rank === 1) {
@@ -386,16 +396,19 @@ export class CasinoWorld implements World {
     return null;
   }
 
-  /** 保险决定:亮暗牌查庄家黑杰克;买了且庄 BJ 赔 2:1,没买或庄没 BJ 就继续打。 */
-  private resolveInsurance(): OpResult {
+  /** 保险决定:庄家私下查暗牌(不翻开);买了且庄 BJ 赔 2:1,没买或庄没 BJ 就继续打。 */
+  private async resolveInsurance(): Promise<OpResult> {
     const state = this.state!;
-    state.holeRevealed = true;
     if (state.insurance > 0 && handValue(state.dealerCards).natural) {
       state.insuranceOutcome = 'won';
     } else if (state.insurance > 0) {
       state.insuranceOutcome = 'lost';
     }
     if (handValue(state.dealerCards).natural) {
+      state.holeRevealed = true;
+      this.save();
+      this.broadcast();
+      await this.sleep();
       return { ok: true, text: this.settle() };
     }
     state.phase = 'playerActing';
@@ -404,14 +417,29 @@ export class CasinoWorld implements World {
     return { ok: true, text: this.actingReceipt() };
   }
 
-  /** 闲家打完:翻暗牌,引擎按固定规则替庄家补牌,然后结算。 */
-  private dealerPlayAndSettle(): string {
+  /** 闲家打完:翻暗牌,引擎按固定规则替庄家补牌(逐张停顿),然后结算。 */
+  private async dealerPlayAndSettle(): Promise<string> {
     const state = this.state!;
     state.holeRevealed = true;
+    state.dealerActing = true;
+    this.save();
+    this.broadcast();
+    await this.sleep();
     while (dealerShouldHit(state.dealerCards, this.opts.cfg.dealerHitsSoft17)) {
       state.dealerCards.push(this.draw());
+      this.save();
+      this.broadcast();
+      await this.sleep();
     }
+    state.dealerActing = false;
     return this.settle();
+  }
+
+  /** 发牌节奏:翻暗牌与每张补牌之间的停顿,由配置 dealDelayMs 控制。 */
+  private sleep(): Promise<void> {
+    const ms = Math.max(0, Math.floor(this.opts.cfg.dealDelayMs));
+    if (!ms) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /** 结算:逐手比点、保险并账、转账、记档、推事件、回 idle(牌留在桌面上)。 */
@@ -594,7 +622,7 @@ export class CasinoWorld implements World {
 
     if (['bet', 'hit', 'stand', 'double', 'split', 'insurance', 'surrender'].includes(action)) {
       if (state.aiRole !== 'dealer') throw new Error('你是庄家,闲家是自动的(AI);选庄后再开一手。');
-      const result = this.playerAction(action === 'bet' || action === 'insurance' ? { action, amount: arg.amount } : { action });
+      const result = await this.playerAction(action === 'bet' || action === 'insurance' ? { action, amount: arg.amount } : { action });
       if (!result.ok) throw new Error(result.text);
       return this.snapshot();
     }
@@ -636,6 +664,7 @@ export class CasinoWorld implements World {
       bet: state.bet,
       insurance: state.insurance,
       holeRevealed: state.holeRevealed,
+      dealerActing: state.dealerActing,
       hands: state.hands.map((hand, i) => ({
         cards: formatHand(hand.cards),
         total: hand.cards.length ? handValue(hand.cards).total : null,

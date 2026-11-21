@@ -53,7 +53,8 @@ function rigTable(patch: { shoe?: Array<{ rank: number; suit: number }>; aiChips
 
 function worldWith(rng?: () => number, cfgPatch: Partial<typeof CASINO_DEFAULTS> = {}): CasinoWorld {
   const ctx = fakeWorldContext(CASINO, { scratchDir });
-  Object.assign(ctx.cfg, cfgPatch);
+  // 测试不要发牌停顿;单独测节奏时在 cfgPatch 里覆盖。
+  Object.assign(ctx.cfg, { dealDelayMs: 0, ...cfgPatch });
   return new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, rng });
 }
 

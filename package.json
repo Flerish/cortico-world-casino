@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-casino",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Moonlit Table: a local blackjack table the bot can sit at by itself, with the owner welcome to take a seat on the same table through the WebUI panel. Chips are game numbers only.",
   "license": "MIT",

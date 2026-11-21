@@ -78,6 +78,8 @@ export interface TableState {
   dealerCards: Card[];
   /** 庄家暗牌已翻开。 */
   holeRevealed: boolean;
+  /** 引擎正在替庄家按规则打牌(停顿期间面板与工具都要等它)。 */
+  dealerActing: boolean;
   history: HandRecord[];
   /** 牌靴(未抽完的牌),耗尽时重洗。 */
   shoe: Card[];
@@ -103,6 +105,7 @@ export function newTable(startChips: number): TableState {
     activeHand: 0,
     dealerCards: [],
     holeRevealed: false,
+    dealerActing: false,
     history: [],
     shoe: [],
     drawn: 0,
