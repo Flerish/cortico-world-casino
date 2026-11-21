@@ -28,7 +28,7 @@
         "description": "A local blackjack table you share with your AI: pick the dealer, bet, hit and stand; chips are game numbers only."
       }
     },
-    "tags": [],
+    "tags": ["game", "experimental"],
     "describe": "describe.json"
   },
   "files": [
