@@ -327,34 +327,36 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.stop();
   });
 
-  it('加倍校验:翻倍后超出某方余额则拒绝', async () => {
+  it('加倍校验:翻倍后超出闲家自己的余额则拒绝', async () => {
     rigTable({ playerChips: 15 });
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'ai' });
     await act(world, 'bet', { amount: 10 });
-    await expect(act(world, 'double')).rejects.toThrow('赔得起');
+    await expect(act(world, 'double')).rejects.toThrow('你的余额 15');
     await world.stop();
   });
 
-  it('加倍校验看的是庄家银行:AI 闲家加倍不能超过玩家(庄)赔得起的数', async () => {
+  it('加倍可以超过庄家银行:赔付把庄家打成负数(按开发者口味)', async () => {
     rigTable({ playerChips: 20 }); // 玩家坐庄,银行只有 20
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'player' });
     await tool(world, 'casino_player', { action: 'bet', amount: 15 });
-    const text = await tool(world, 'casino_player', { action: 'double' });
-    expect(text).toContain('赔得起');
+    await tool(world, 'casino_player', { action: 'double' }); // 注 30,补 ♠6 → 11 → 停 → 庄家自动打
+    const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap;
+    expect(snap.ai.chips).toBe(1030);
+    expect(snap.player.chips).toBe(-10);
     await world.stop();
   });
 
-  it('下注校验:超上限与超双方余额都拒绝', async () => {
+  it('下注校验:超上限与超闲家余额都拒绝', async () => {
     rigTable({ playerChips: 15 });
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'ai' });
     await expect(act(world, 'bet', { amount: 500 })).rejects.toThrow('单手上限 200');
-    await expect(act(world, 'bet', { amount: 30 })).rejects.toThrow('较小值 15');
+    await expect(act(world, 'bet', { amount: 30 })).rejects.toThrow('余额 15,押不起 30');
     await world.stop();
   });
 

@@ -312,10 +312,9 @@ export class CasinoWorld implements World {
       const doubled = hand.bet * 2;
       if (doubled > this.opts.cfg.maxBet) return { ok: false, text: `加倍后会超过单手上限 ${this.opts.cfg.maxBet}。` };
       const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
-      const dealerChips = state.aiRole === 'player' ? state.player.chips : state.ai.chips;
       const otherBets = state.hands.reduce((sum, h) => sum + h.bet, 0) - hand.bet;
-      if (doubled + otherBets > Math.min(idlerChips, dealerChips)) {
-        return { ok: false, text: `加倍后总注 ${doubled + otherBets} 超出了某一方赔得起的余额。` };
+      if (doubled + otherBets > idlerChips) {
+        return { ok: false, text: `加倍后你的总注 ${doubled + otherBets} 超出了你的余额 ${idlerChips}。` };
       }
       hand.bet = doubled;
       hand.doubled = true;
@@ -329,8 +328,9 @@ export class CasinoWorld implements World {
       if (state.hands.length > 1) return { ok: false, text: '这只允许分一次(两手)。' };
       if (hand.cards.length !== 2) return { ok: false, text: '只有刚发的两张牌能分。' };
       if (hand.cards[0]!.rank !== hand.cards[1]!.rank) return { ok: false, text: '两张牌点数相同才能分。' };
-      if (hand.bet * 2 > this.opts.cfg.maxBet * 2 || hand.bet * 2 > Math.min(state.ai.chips, state.player.chips)) {
-        return { ok: false, text: `分牌后总注 ${hand.bet * 2} 超出上限或某一方赔得起的余额。` };
+      const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
+      if (hand.bet * 2 > this.opts.cfg.maxBet * 2 || hand.bet * 2 > idlerChips) {
+        return { ok: false, text: `分牌后总注 ${hand.bet * 2} 超出上限或你的余额 ${idlerChips}。` };
       }
       const card0 = hand.cards[0]!;
       const card1 = hand.cards[1]!;
@@ -779,15 +779,15 @@ export class CasinoWorld implements World {
 
   // ---------------------------------------------------------------- 底层
 
-  /** 校验下注:整数、范围内、不超过闲家与庄家余额的较小值。 */
+  /** 校验下注:整数、范围内、不超过闲家自己的余额——赔付把庄家打成负数是可以接受的。 */
   private readBet(raw: unknown): number | string {
     const bet = Math.floor(Number(raw));
     if (!Number.isFinite(bet)) return `下注要是整数,收到 ${JSON.stringify(raw ?? null)}。`;
     const state = this.state!;
+    const idlerChips = state.aiRole === 'player' ? state.ai.chips : state.player.chips;
     if (bet < this.opts.cfg.minBet) return `最小下注 ${this.opts.cfg.minBet}。`;
     if (bet > this.opts.cfg.maxBet) return `单手上限 ${this.opts.cfg.maxBet}。`;
-    const backing = Math.min(state.player.chips, state.ai.chips);
-    if (bet > backing) return `押注不能超过双方余额的较小值 ${backing}(你 ${state.player.chips} / 对方 ${state.ai.chips})。`;
+    if (bet > idlerChips) return `余额 ${idlerChips},押不起 ${bet}。`;
     return bet;
   }
 
