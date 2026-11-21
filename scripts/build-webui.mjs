@@ -1,4 +1,4 @@
-/** 面板打包:src/webui/client.ts → dist/webui.js(esbuild,bundle + esm + minify)。 */
+/** 面板打包:src/webui/client.ts → dist/webui.js;图片经 dataurl loader 内联。 */
 import * as esbuild from 'esbuild';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,6 +16,10 @@ await esbuild.build({
   target: 'es2022',
   minify: true,
   logLevel: 'info',
+  loader: {
+    '.jpg': 'dataurl',
+    '.png': 'dataurl',
+  },
 });
 
 console.log(`wrote ${outfile}`);

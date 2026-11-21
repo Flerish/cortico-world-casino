@@ -3,6 +3,8 @@
  * 对 cortico/* 只允许 import type;运行时值由包自带(装载器规范)。
  */
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
+import cardFaceUrl from './assets/card-face.jpg';
+import cardBackUrl from './assets/card-back.jpg';
 
 interface SeatView {
   chips: number;
@@ -64,17 +66,34 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return node;
 }
 
-/** 一张扑克牌:text 形如 ♠K;hidden 时画牌背。 */
+/** 手绘素材:正面模板 + 花纹牌背(esbuild dataurl 内联)。 */
+
+function imgEl(url: string): HTMLImageElement {
+  const img = document.createElement('img');
+  img.src = url;
+  img.className = 'cardimg';
+  img.draggable = false;
+  return img;
+}
+
+const SUIT_TONE: Record<string, string> = { '♠': 'idx-black', '♣': 'idx-black', '♥': 'idx-red', '♦': 'idx-red' };
+
+/** 一张扑克牌:text 形如 ♠K;hidden 时画手绘牌背。亮牌 = 模板图 + 角标与中央花色叠加。 */
 function cardEl(text: string, hidden = false): HTMLElement {
-  const card = el('div', hidden ? 'pcard back' : 'pcard');
-  if (!hidden) {
-    const suit = text.slice(0, 1);
-    const rank = text.slice(1);
-    card.classList.add(suit === '♥' || suit === '♦' ? 'red' : 'black');
-    const corner = el('div', 'corner');
-    corner.append(el('div', 'corner-rank', rank), el('div', 'corner-suit', suit));
-    card.append(corner, el('div', 'pip', suit));
+  const card = el('div', 'pcard');
+  if (hidden) {
+    card.append(imgEl(cardBackUrl));
+    return card;
   }
+  card.append(imgEl(cardFaceUrl));
+  const suit = text.slice(0, 1);
+  const rank = text.slice(1);
+  const tone = SUIT_TONE[suit] ?? 'idx-black';
+  const corner = el('div', `idx ${tone}`);
+  corner.append(el('div', 'idx-rank', rank), el('div', 'idx-suit', suit));
+  const cornerFlip = el('div', `idx idx-flip ${tone}`);
+  cornerFlip.append(el('div', 'idx-rank', rank), el('div', 'idx-suit', suit));
+  card.append(corner, cornerFlip, el('div', `pip ${tone}`, suit));
   return card;
 }
 
@@ -137,16 +156,18 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .seat-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
     .seat-role { background: rgba(0,0,0,.32); padding: 1px 9px; border-radius: 999px; font-size: 11px; }
     .seatstats { font-size: 11px; opacity: .7; }
-    .cards { display: flex; gap: 7px; min-height: 76px; align-items: center; }
-    .pcard { width: 52px; height: 74px; background: #fdfcf7; border-radius: 6px; position: relative;
-      box-shadow: 0 2px 5px rgba(0,0,0,.4); flex: none; }
-    .pcard .corner { position: absolute; top: 3px; left: 5px; line-height: 1; text-align: center; }
-    .corner-rank { font-size: 14px; font-weight: 800; }
-    .corner-suit { font-size: 11px; }
-    .pcard .pip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 30px; }
-    .pcard.red { color: #cf3049; } .pcard.black { color: #23211c; }
-    .pcard.back { background: repeating-linear-gradient(45deg, #2b4a9b 0 5px, #1e3572 5px 10px);
-      border: 3px solid #f4efe2; box-sizing: border-box; }
+    .cards { display: flex; gap: 7px; min-height: 80px; align-items: center; }
+    .pcard { width: 56px; height: 79px; border-radius: 6px; position: relative; flex: none; overflow: hidden;
+      background: #14120d; box-shadow: 0 2px 5px rgba(0,0,0,.45); }
+    .cardimg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
+    .idx { position: absolute; top: 3px; left: 5px; line-height: 1; text-align: center;
+      text-shadow: 0 1px 0 rgba(255,255,255,.45); }
+    .idx-flip { top: auto; left: auto; bottom: 3px; right: 5px; transform: rotate(180deg); }
+    .idx-rank { font-size: 14px; font-weight: 800; font-family: Georgia, 'Times New Roman', serif; }
+    .idx-suit { font-size: 11px; }
+    .idx-black { color: #1d2f55; } .idx-red { color: #a52a35; }
+    .pip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 30px; text-shadow: 0 1px 0 rgba(255,255,255,.45); }
     .pcard.hole-gap { margin-right: 10px; }
     .total-pill { background: rgba(0,0,0,.34); border-radius: 999px; padding: 2px 12px; font-size: 12px; }
     .pot { display: flex; justify-content: center; margin: 10px 0; }

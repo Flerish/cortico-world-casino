@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>月下牌桌 · 牌面预览</title>
+<style>
+  body { background: #101418; color: #eee; font-family: system-ui, sans-serif; padding: 24px; }
+  .felt { border-radius: 16px; border: 7px solid #4a3220; background:
+    radial-gradient(ellipse at 50% 38%, #208652 0%, #14603a 55%, #0c4527 100%);
+    box-shadow: inset 0 0 46px rgba(0,0,0,.5); padding: 20px; width: 620px; color: #f4efe2; }
+  .seat { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 10px 0; }
+  .seat-head { font-size: 13px; opacity: .95; }
+  .cards { display: flex; gap: 7px; min-height: 80px; align-items: center; }
+  .pcard { width: 56px; height: 79px; border-radius: 6px; position: relative; flex: none; overflow: hidden;
+    background: #14120d; box-shadow: 0 2px 5px rgba(0,0,0,.45); }
+  .cardimg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
+  .idx { position: absolute; top: 3px; left: 5px; line-height: 1; text-align: center;
+    text-shadow: 0 1px 0 rgba(255,255,255,.45); }
+  .idx-flip { top: auto; left: auto; bottom: 3px; right: 5px; transform: rotate(180deg); }
+  .idx-rank { font-size: 14px; font-weight: 800; font-family: Georgia, 'Times New Roman', serif; }
+  .idx-suit { font-size: 11px; }
+  .idx-black { color: #1d2f55; } .idx-red { color: #a52a35; }
+  .pip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 30px; text-shadow: 0 1px 0 rgba(255,255,255,.45); }
+  .pcard.hole-gap { margin-right: 10px; }
+  .total-pill { background: rgba(0,0,0,.34); border-radius: 999px; padding: 2px 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h3>牌面预览:手绘模板 + 角标叠加 / 手绘牌背</h3>
+<div class="felt">
+  <div class="seat">
+    <div class="seat-head">庄家(AI)· 明牌 + 暗牌</div>
+    <div class="cards" id="dealer"></div>
+    <div class="total-pill">明牌 5 点 +1 暗牌</div>
+  </div>
+  <div class="seat">
+    <div class="seat-head">闲家(我)· 五张牌同屏</div>
+    <div class="cards" id="player"></div>
+    <div class="total-pill">21 点</div>
+  </div>
+</div>
+<script>
+function el(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
+function imgEl(src) { const i = document.createElement('img'); i.src = src; i.className = 'cardimg'; i.draggable = false; return i; }
+const FACE = './card-face.jpg';
+const BACK = './card-back.jpg';
+const TONE = { '♠': 'idx-black', '♣': 'idx-black', '♥': 'idx-red', '♦': 'idx-red' };
+function cardEl(text, hidden) {
+  const card = el('div', 'pcard');
+  if (hidden) { card.append(imgEl(BACK)); return card; }
+  card.append(imgEl(FACE));
+  const suit = text.slice(0, 1), rank = text.slice(1), tone = TONE[suit] || 'idx-black';
+  const c1 = el('div', 'idx ' + tone); c1.append(el('div', 'idx-rank', rank), el('div', 'idx-suit', suit));
+  const c2 = el('div', 'idx idx-flip ' + tone); c2.append(el('div', 'idx-rank', rank), el('div', 'idx-suit', suit));
+  card.append(c1, c2, el('div', 'pip ' + tone, suit));
+  return card;
+}
+const dealer = document.getElementById('dealer');
+dealer.append(cardEl('♠4'), cardEl('', true));
+const player = document.getElementById('player');
+for (const t of ['♠A', '♥K', '♦10', '♣7', '♠J']) player.append(cardEl(t));
+</script>
+</body>
+</html>
