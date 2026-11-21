@@ -366,6 +366,41 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.stop();
   });
 
+  it('记录并重来:归档场次、筹码清零、等选庄', async () => {
+    const world = worldWith(zeroRng);
+    const host = new FakeHost();
+    await world.start(host);
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    await act(world, 'stand'); // 庄爆,玩家 +50 → 1050 / 950
+    const snap = await act(world, 'resetmatch') as Snap & { matches: Array<{ rounds: number; aiChips: number; playerChips: number; winner: string }> };
+    expect(snap.phase).toBe('idle');
+    expect(snap.aiRole).toBe(null);
+    expect(snap.ai.chips).toBe(1000);
+    expect(snap.player.chips).toBe(1000);
+    expect(snap.matches).toHaveLength(1);
+    expect(snap.matches[0]!.rounds).toBe(1);
+    expect(snap.matches[0]!.aiChips).toBe(950);
+    expect(snap.matches[0]!.playerChips).toBe(1050);
+    expect(snap.matches[0]!.winner).toBe('player');
+    // AI 收到场次重置通知
+    const last = host.events[host.events.length - 1]!;
+    expect(last.type).toBe('casino.action');
+    expect(last.text).toContain('归档');
+    await world.stop();
+  });
+
+  it('场次记录最多保存 10 条', async () => {
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    for (let i = 0; i < 11; i++) {
+      await act(world, 'resetmatch');
+    }
+    const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap & { matches: unknown[] };
+    expect(snap.matches).toHaveLength(10);
+    await world.stop();
+  });
+
   it('存档跨实例延续:手进行到一半重启,牌面与阶段还在', async () => {
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());

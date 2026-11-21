@@ -11,9 +11,11 @@ import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { dealerShouldHit, formatCard, handValue, freshDeck, shuffled, type Card } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
+import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
   formatHand,
   loadTable,
+  newSeat,
   newTable,
   recordHand,
   saveTable,
@@ -105,6 +107,7 @@ export class CasinoWorld implements World {
   readonly id = 'casino';
   private host: WorldHost | null = null;
   private state: TableState | null = null;
+  private matches: MatchRecord[] = [];
   private readonly sockets = new Set<WorldStreamSocket>();
 
   constructor(private readonly opts: CasinoWorldOptions) {}
@@ -162,6 +165,7 @@ export class CasinoWorld implements World {
       this.state = newTable(this.opts.cfg.startChips);
       this.save();
     }
+    this.matches = loadMatches(this.opts.dataDir);
     if (this.state.dealerActing) {
       // 进程在庄家打牌途中重启:把这一手按规则打完再交给面板。
       await this.dealerPlayAndSettle();
@@ -637,6 +641,10 @@ export class CasinoWorld implements World {
       this.broadcast();
       return this.snapshot();
     }
+    if (action === 'resetmatch') {
+      this.recordMatchAndReset();
+      return this.snapshot();
+    }
     if (action === 'nudge') {
       if (state.phase === 'betting' && state.aiRole === 'player') {
         this.notifyBettingTurn();
@@ -656,6 +664,50 @@ export class CasinoWorld implements World {
       return this.snapshot();
     }
     throw new Error(`未知动作 ${action}`);
+  }
+
+  /** 「记录并重来」:归档当前场次(最多留 10 场),筹码与战绩清零,重新等选庄。 */
+  private recordMatchAndReset(): void {
+    const state = this.state!;
+    const winner: MatchRecord['winner'] =
+      state.ai.chips > state.player.chips ? 'ai' : state.player.chips > state.ai.chips ? 'player' : 'tie';
+    // round 是"下一手的编号",已打完的手数恒为 round - 1(结算后、进行中都一样)。
+    const played = Math.max(0, state.round - 1);
+    const record: MatchRecord = {
+      at: nowIso(this.opts.timezone),
+      rounds: played,
+      aiChips: state.ai.chips,
+      playerChips: state.player.chips,
+      aiNet: state.ai.net,
+      playerNet: state.player.net,
+      winner,
+    };
+    this.matches = [record, ...this.matches].slice(0, MATCHES_LIMIT);
+    saveMatches(this.opts.dataDir, this.matches);
+    const startChips = this.opts.cfg.startChips;
+    state.ai = newSeat(startChips);
+    state.player = newSeat(startChips);
+    state.aiRole = null;
+    state.phase = 'idle';
+    state.round = 0;
+    state.bet = 0;
+    state.insurance = 0;
+    state.insuranceOutcome = 'none';
+    state.hands = [];
+    state.activeHand = 0;
+    state.dealerCards = [];
+    state.holeRevealed = false;
+    state.dealerActing = false;
+    this.save();
+    this.broadcast();
+    void this.host?.pushEvent({
+      type: 'casino.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: `主人把这一场(${played} 手)归档了:结束时你 ${record.aiChips} / 主人 ${record.playerChips} 筹码,${record.winner === 'ai' ? '你赢' : record.winner === 'player' ? '主人赢' : '打平'}。双方重新拿 ${startChips},新的一场等选庄开始。`,
+    }, { trigger: 'flush' });
   }
 
   private handleStream(_panel: string, socket: WorldStreamSocket): void {
@@ -713,6 +765,7 @@ export class CasinoWorld implements World {
       maxBet: this.opts.cfg.maxBet,
       startChips: this.opts.cfg.startChips,
       dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17,
+      matches: this.matches,
       lastResult: state.history[0] ?? null,
       history: state.history.slice(0, 10),
     };

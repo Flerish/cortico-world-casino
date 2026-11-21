@@ -39,6 +39,16 @@ interface HandRecordView {
   at: string;
 }
 
+interface MatchView {
+  at: string;
+  rounds: number;
+  aiChips: number;
+  playerChips: number;
+  aiNet: number;
+  playerNet: number;
+  winner: 'ai' | 'player' | 'tie';
+}
+
 interface Snapshot {
   version: number;
   phase: 'idle' | 'betting' | 'insurance' | 'playerActing';
@@ -60,6 +70,7 @@ interface Snapshot {
   maxBet: number;
   startChips: number;
   dealerHitsSoft17: boolean;
+  matches: MatchView[];
   lastResult: HandRecordView | null;
   history: HandRecordView[];
 }
@@ -140,8 +151,8 @@ async function send(ctx: WebUiPanelContext, action: string, extra: Record<string
   }
 }
 
-/** 界面本地状态:下注输入、历史折叠与规则浮层;换手时下注清零。 */
-const ui = { bet: 0, historyOpen: false, rulesOpen: false };
+/** 界面本地状态:下注输入、折叠区与规则浮层;换手时下注清零。 */
+const ui = { bet: 0, historyOpen: false, rulesOpen: false, matchOpen: false };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
 
@@ -256,6 +267,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .history-cards { letter-spacing: 1px; opacity: .85; }
     .hidden { display: none; }
     .casino-error { color: #c0506a; font-size: 12px; min-height: 15px; margin-top: 6px; }
+    .casino-idle { opacity: .5; font-size: 12px; padding: 2px 0; }
   `;
   root.append(style);
 
@@ -275,7 +287,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     ui.rulesOpen = !ui.rulesOpen;
     if (current) render(ctx, current);
   }, { signal: ctx.signal });
-  topbar.append(rulesBtn);
+  const resetBtn = el('button', 'rules-btn', '记录并重来');
+  resetBtn.type = 'button';
+  resetBtn.addEventListener('click', () => void send(ctx, 'resetmatch'), { signal: ctx.signal });
+  topbar.append(rulesBtn, resetBtn);
   wrap.append(topbar);
 
   // ── 绿呢桌面 ──
@@ -526,6 +541,32 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   }
   history.append(list);
   wrap.append(history);
+
+  // ── 场次记录 ──
+  const matchBox = el('div', 'history');
+  const matchToggle = el('button', 'history-toggle', `${ui.matchOpen ? '▾' : '▸'} 场次记录(${state.matches.length})`);
+  matchToggle.type = 'button';
+  matchToggle.addEventListener('click', () => {
+    ui.matchOpen = !ui.matchOpen;
+    matchToggle.textContent = `${ui.matchOpen ? '▾' : '▸'} 场次记录(${state.matches.length})`;
+    matchList.classList.toggle('hidden', !ui.matchOpen);
+  }, { signal: ctx.signal });
+  matchBox.append(matchToggle);
+  const matchList = el('div');
+  matchList.classList.toggle('hidden', !ui.matchOpen);
+  if (!state.matches.length) matchList.append(el('div', 'casino-idle', '还没有归档的场次;点右上角「记录并重来」把当前场次存档并重置筹码。'));
+  for (const match of state.matches) {
+    const line = el('div', 'history-line');
+    const when = (match.at || '').slice(5, 16).replace('T', ' ');
+    line.append(el('span', undefined, `${when} · ${match.rounds} 手`));
+    line.append(el('span', 'history-cards', `AI ${match.aiChips} / 我 ${match.playerChips}`));
+    line.append(el('span', `delta ${match.winner === 'ai' ? 'down' : match.winner === 'player' ? 'up' : ''}`,
+      match.winner === 'ai' ? 'AI 赢' : match.winner === 'player' ? '我赢' : '平'));
+    line.append(el('span', undefined, `净 ${match.playerNet >= 0 ? '+' : ''}${match.playerNet}`));
+    matchList.append(line);
+  }
+  matchBox.append(matchList);
+  wrap.append(matchBox);
 
   // ── 规则浮层 ──
   if (ui.rulesOpen) wrap.append(buildRules(ctx));
