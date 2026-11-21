@@ -344,11 +344,22 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     }
   } else if (state.phase === 'betting' && playerIsIdler) {
     const cap = Math.min(state.maxBet, state.player.chips, state.ai.chips);
+    ui.bet = Math.min(ui.bet, cap);
     const build = el('div', 'betbuild');
     const view = el('span', 'betview', `押 ${ui.bet}`);
+    const clear = el('button', undefined, '清零');
+    clear.type = 'button';
+    const go = el('button', 'primary', `下注开局(上限 ${cap})`);
+    go.type = 'button';
+    // 按钮/筹码的可点状态跟着注额走:加注即亮,不依赖下一次重渲染。
+    const sync = (): void => {
+      view.textContent = `押 ${ui.bet}`;
+      clear.disabled = ui.bet === 0;
+      go.disabled = ui.bet < state.minBet;
+    };
     const add = (n: number): void => {
       ui.bet = Math.min(cap, ui.bet + n);
-      view.textContent = `押 ${ui.bet}`;
+      sync();
     };
     for (const [label, n, tone] of [['+10', 10, 'red'], ['+50', 50, 'green'], ['+100', 100, 'black']] as const) {
       const chip = el('div', `chip chip-${tone}`, label);
@@ -358,25 +369,19 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const allin = el('div', 'chip chip-gold', '全押');
     allin.addEventListener('click', () => {
       ui.bet = cap;
-      view.textContent = `押 ${ui.bet}`;
+      sync();
     }, { signal: ctx.signal });
     build.append(allin, view);
     wrap.append(build);
     const row = el('div', 'btnrow');
-    const clear = el('button', undefined, '清零');
-    clear.type = 'button';
-    clear.disabled = ui.bet === 0;
     clear.addEventListener('click', () => {
       ui.bet = 0;
-      view.textContent = '押 0';
-      clear.disabled = true;
+      sync();
     }, { signal: ctx.signal });
-    const go = el('button', 'primary', `下注开局(上限 ${cap})`);
-    go.type = 'button';
-    go.disabled = ui.bet < state.minBet;
     go.addEventListener('click', () => void send(ctx, 'bet', { amount: ui.bet }), { signal: ctx.signal });
     row.append(clear, go);
     wrap.append(row);
+    sync();
   } else if (state.phase === 'betting') {
     const banner = el('div', 'banner wait');
     banner.append(el('span', 'banner-text', '等 AI 下注…'));
