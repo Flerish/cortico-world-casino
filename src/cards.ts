@@ -59,7 +59,9 @@ export function handValue(cards: readonly Card[]): HandValue {
   };
 }
 
-/** 庄家规则:总数小于 17 补牌,17 及以上停(含软 17)。 */
-export function dealerShouldHit(cards: readonly Card[]): boolean {
-  return handValue(cards).total < 17;
+/** 庄家规则:总数不足 17 必须补;到 17 停。软 17 是否再补由桌子规则定(S17/H17)。 */
+export function dealerShouldHit(cards: readonly Card[], hitsSoft17: boolean): boolean {
+  const value = handValue(cards);
+  if (value.total < 17) return true;
+  return hitsSoft17 && value.total === 17 && value.soft;
 }

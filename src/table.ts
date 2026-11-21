@@ -7,12 +7,12 @@ import { join } from 'node:path';
 import type { Card } from './cards.ts';
 import { formatCard } from './cards.ts';
 
-/** 庄闲角色;AI 与玩家各执一个,互为对家。 */
+/** 庄闲角色;AI 与玩家各执一个,互为对家。庄家是机械的银行,按固定规则自动打。 */
 export type Role = 'dealer' | 'player';
 
 /** 一手进行到哪一步。idle:等选庄/再开;betting:等闲家下注;playerActing:等闲家动作;
- *  dealerActing:庄家已亮暗牌,等庄家动作。 */
-export type Phase = 'idle' | 'betting' | 'playerActing' | 'dealerActing';
+ *  闲家结束后庄家由引擎按规则自动打完,直接进入结算。 */
+export type Phase = 'idle' | 'betting' | 'playerActing';
 
 export type Outcome = 'win' | 'lose' | 'push' | 'blackjack' | 'bust';
 
@@ -52,8 +52,10 @@ export interface TableState {
   /** 手数,从 1 起。 */
   round: number;
   bet: number;
+  /** 闲家的手,全部明牌;庄家的手第二张是暗牌,闲家打完后才翻开。 */
   playerCards: Card[];
   dealerCards: Card[];
+  /** 庄家暗牌已翻开(闲家打完、引擎按规则补牌前后)。 */
   holeRevealed: boolean;
   doubled: boolean;
   history: HandRecord[];

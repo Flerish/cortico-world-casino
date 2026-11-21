@@ -12,12 +12,11 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
   describe: {
     tools: describeTools(CASINO_TOOL_DECLS, {
       casino_table: { zh: '看牌桌状态:谁坐庄、到哪一步、双方的牌与筹码;查历史手。', en: 'Read the table state and hand history.' },
-      casino_player: { zh: '以闲家身份行动:下注开手、要牌、停牌、加倍。', en: 'Act as the player: bet, hit, stand, double.' },
-      casino_dealer: { zh: '以庄家身份行动:亮牌后要牌或停牌。', en: 'Act as the dealer: hit or stand with the hole card revealed.' },
+      casino_player: { zh: '以闲家身份行动:下注开手、要牌、停牌、加倍。庄家由引擎按规则自动打。', en: 'Act as the player: bet, hit, stand, double. The dealer is played by the engine.' },
       casino_bank: { zh: '查筹码账户;破产时领救济金。', en: 'Read the chip account; take bankruptcy relief when broke.' },
     }),
     events: [
-      { type: 'casino.turn', description: { zh: '轮到 AI 行动:作为闲家下注,或作为庄家做要牌/停牌决定。', en: 'It is the AI turn to bet or to act as the dealer.' } },
+      { type: 'casino.turn', description: { zh: '轮到 AI 下注(它坐闲家时)。', en: 'It is the AI turn to bet as the player.' } },
       { type: 'casino.result', description: { zh: '一手结算:双方的牌、点数、输赢与筹码变化。', en: 'A hand settled with both sides cards and the chip transfer.' } },
     ],
   },

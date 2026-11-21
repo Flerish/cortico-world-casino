@@ -10,6 +10,8 @@ export interface CasinoConfigSection {
   minBet: number;
   /** 单手最大下注。 */
   maxBet: number;
+  /** 庄家软 17 是否补牌(H17);false = 软 17 停(S17)。热改:本手内即按现值。 */
+  dealerHitsSoft17: boolean;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -17,6 +19,7 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   startChips: 1000,
   minBet: 10,
   maxBet: 200,
+  dealerHitsSoft17: false,
 };
 
 const TEXT = {
@@ -25,12 +28,14 @@ const TEXT = {
     startChips: { title: '起始筹码', description: '首次开局与破产救济时发放的筹码数。' },
     minBet: { title: '最小下注', description: '低于这个数的余额视为破产,可以领救济。' },
     maxBet: { title: '单手最大下注', description: '一手牌最多能押的筹码数。' },
+    dealerHitsSoft17: { title: '庄家软 17 补牌(H17)', description: '开 = 庄家软 17 也要牌;关 = 软 17 停牌(S17,默认)。' },
   },
   en: {
     title: 'Moonlit Table',
     startChips: { title: 'Starting chips', description: 'Chips granted on first start and on bankruptcy relief.' },
     minBet: { title: 'Minimum bet', description: 'A balance below this counts as broke and may take relief.' },
     maxBet: { title: 'Maximum bet per hand', description: 'The most one hand may stake.' },
+    dealerHitsSoft17: { title: 'Dealer hits soft 17 (H17)', description: 'On = dealer draws to soft 17; off = dealer stands on all 17s (S17, default).' },
   },
 } as const;
 
@@ -67,6 +72,12 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           title: t.maxBet.title,
           description: t.maxBet.description,
           minimum: 1,
+          'x-hot': true,
+        },
+        'worlds.casino.dealerHitsSoft17': {
+          type: 'boolean',
+          title: t.dealerHitsSoft17.title,
+          description: t.dealerHitsSoft17.description,
           'x-hot': true,
         },
       },

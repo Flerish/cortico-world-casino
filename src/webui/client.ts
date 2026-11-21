@@ -29,7 +29,7 @@ interface HandRecordView {
 
 interface Snapshot {
   version: number;
-  phase: 'idle' | 'betting' | 'playerActing' | 'dealerActing';
+  phase: 'idle' | 'betting' | 'playerActing';
   round: number;
   aiRole: 'dealer' | 'player' | null;
   bet: number;
@@ -38,6 +38,7 @@ interface Snapshot {
   playerCards: string[];
   playerTotal: number | null;
   dealerCards: string[];
+  dealerVisibleTotal: number | null;
   dealerTotal: number | null;
   holeCount: number;
   ai: SeatView;
@@ -45,6 +46,7 @@ interface Snapshot {
   minBet: number;
   maxBet: number;
   startChips: number;
+  dealerHitsSoft17: boolean;
   lastResult: HandRecordView | null;
   history: HandRecordView[];
 }
@@ -221,7 +223,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   topbar.append(el('span', 'casino-title', '月下牌桌'));
   const roleText = state.aiRole === null
     ? '还没开局'
-    : state.aiRole === 'dealer' ? 'AI 坐庄 · 你是闲家' : '你坐庄 · AI 是闲家';
+    : state.aiRole === 'dealer' ? 'AI 坐庄 · 你是闲家' : '你坐庄(按规则自动打)· AI 是闲家';
   topbar.append(el('span', 'casino-round', state.round > 0 ? `第 ${state.round} 手 · ${roleText}` : roleText));
   wrap.append(topbar);
 
@@ -251,8 +253,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   for (let i = 0; i < state.holeCount; i++) dealerCards.append(cardEl('', true));
   if (state.phase === 'idle' && state.round === 0) dealerCards.append(el('span', 'seatstats', '等待开局…'));
   dealerSeat.append(dealerCards);
-  if (state.dealerTotal !== null) {
-    dealerSeat.append(el('div', 'total-pill', `${state.holeRevealed ? '庄家' : '明牌'} ${state.dealerTotal} 点${state.holeCount > 0 ? ` +${state.holeCount} 暗牌` : ''}`));
+  if (state.holeRevealed && state.dealerTotal !== null) {
+    dealerSeat.append(el('div', 'total-pill', `庄家 ${state.dealerTotal} 点`));
+  } else if (state.dealerVisibleTotal !== null) {
+    dealerSeat.append(el('div', 'total-pill', `庄家明牌 ${state.dealerVisibleTotal} 点${state.holeCount > 0 ? ' +1 暗牌' : ''}`));
   }
   const dealerFoot = el('div', 'seat-head');
   dealerFoot.append(chipsEl('银行', dealerSeatView.chips, dealerIsAi ? 'chip-blue' : 'chip-gold'));
@@ -282,7 +286,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   const playerCards = el('div', 'cards');
   if (state.phase !== 'idle' && state.playerCards.length === 0) playerCards.append(cardEl('', true));
   for (const text of state.playerCards) playerCards.append(cardEl(text));
-  if (state.phase === 'idle' && state.round === 0) playerCards.append(el('span', 'seatstats', '坐庄的负责收注与赔付'));
+  if (state.phase === 'idle' && state.round === 0) playerCards.append(el('span', 'seatstats', '闲家先行动;坐庄按固定规则自动打'));
   playerSeat.append(playerCards);
   if (state.playerTotal !== null) {
     playerSeat.append(el('div', 'total-pill', `闲家 ${state.playerTotal} 点`));
@@ -302,13 +306,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   // ── 等待 AI 的横幅 ──
   const waitingAi =
     (state.phase === 'betting' && state.aiRole === 'player') ||
-    (state.phase === 'dealerActing' && state.aiRole === 'dealer') ||
     (state.phase === 'playerActing' && state.aiRole === 'player');
   if (waitingAi) {
     const wait = el('div', 'banner wait');
     wait.append(el('span', 'banner-text', state.phase === 'betting'
       ? '等 AI 下注…(它已收到通知)'
-      : state.phase === 'playerActing' ? 'AI 思考出牌中…' : '等 AI 做庄决定…(它已收到通知)'));
+      : 'AI 思考出牌中…'));
     const nudge = el('button', undefined, '催一下');
     nudge.type = 'button';
     nudge.addEventListener('click', () => void send(ctx, 'nudge'), { signal: ctx.signal });
@@ -396,16 +399,6 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const banner = el('div', 'banner wait');
     banner.append(el('span', 'banner-text', 'AI 出牌中…'));
     wrap.append(banner);
-  } else if (state.phase === 'dealerActing' && !playerIsIdler) {
-    const row = el('div', 'btnrow');
-    const hit = el('button', 'primary', '庄家要牌');
-    hit.type = 'button';
-    const stand = el('button', undefined, '庄家停牌');
-    stand.type = 'button';
-    hit.addEventListener('click', () => void send(ctx, 'dealer_hit'), { signal: ctx.signal });
-    stand.addEventListener('click', () => void send(ctx, 'dealer_stand'), { signal: ctx.signal });
-    row.append(hit, stand);
-    wrap.append(row);
   }
 
   // ── 历史 ──

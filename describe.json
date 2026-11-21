@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "casino_table",
-      "description": "Read the Moonlit Table state: who is dealer, the phase, the visible cards and totals, the current bet and both chip balances. Actions: \"status\", \"history\" (recent settled hands).",
+      "description": "Read the Moonlit Table state: who is dealer, the phase, the visible cards and totals (the dealer hole card stays hidden until the hand ends), the current bet and both chip balances. Actions: \"status\", \"history\" (recent settled hands).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -34,7 +34,7 @@
     },
     {
       "name": "casino_player",
-      "description": "Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: \"bet\" (place a stake within [minBet, maxBet] and both balances to start the hand; the receipt holds your two cards and the dealer upcard), \"hit\", \"stand\", \"double\" (first two cards only, stake doubles, one card, then you stand).",
+      "description": "Act as the player (闲家) on the Moonlit Table; only valid when the table shows you are the player. Actions: \"bet\" (place a stake within [minBet, maxBet] and both balances to start the hand; the receipt holds your two cards and the dealer upcard), \"hit\" (draw one card, face up; busting settles the hand at once), \"stand\" (the dealer then reveals the hole card and draws by the fixed table rule), \"double\" (first two cards only: the stake doubles, one more card, then you stand).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -62,36 +62,8 @@
         "act"
       ],
       "summary": {
-        "zh": "以闲家身份行动:下注开手、要牌、停牌、加倍。",
-        "en": "Act as the player: bet, hit, stand, double."
-      }
-    },
-    {
-      "name": "casino_dealer",
-      "description": "Act as the dealer (庄家) on the Moonlit Table; only valid when the table shows you are the dealer and the hole card is already revealed. Actions: \"hit\" (draw one card; busting pays the player at once), \"stand\" (settle against the player total you can see).",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "type": "string",
-            "enum": [
-              "hit",
-              "stand"
-            ],
-            "description": "The action to take."
-          }
-        },
-        "required": [
-          "action"
-        ]
-      },
-      "tags": [
-        "act"
-      ],
-      "summary": {
-        "zh": "以庄家身份行动:亮牌后要牌或停牌。",
-        "en": "Act as the dealer: hit or stand with the hole card revealed."
+        "zh": "以闲家身份行动:下注开手、要牌、停牌、加倍。庄家由引擎按规则自动打。",
+        "en": "Act as the player: bet, hit, stand, double. The dealer is played by the engine."
       }
     },
     {
@@ -127,8 +99,8 @@
     {
       "type": "casino.turn",
       "description": {
-        "zh": "轮到 AI 行动:作为闲家下注,或作为庄家做要牌/停牌决定。",
-        "en": "It is the AI turn to bet or to act as the dealer."
+        "zh": "轮到 AI 下注(它坐闲家时)。",
+        "en": "It is the AI turn to bet as the player."
       }
     },
     {
@@ -144,7 +116,7 @@
       "key": "worlds.casino.envPrompt",
       "title": "月下牌桌 · 环境提示词",
       "role": "envPrompt",
-      "content": "月下牌桌是一张就在这台电脑里的 21 点(Blackjack)牌桌,你和主人对坐打,筹码是游戏内数字,不涉及任何真实货币。桌永远摆在那里,但每一手都由主人开局:主人在面板上选庄(自己坐庄,或让你坐庄),选完才发牌。\n\n## 你可能轮到的两种角色\n\n**闲家(下注方)**:主人让你坐闲家时,你会收到「轮到你下注」的事件——用 `casino_player` 的 `bet` 押注(在 {{casino.minBet}} 到 {{casino.maxBet}} 之间,还不能超过两边余额的较小值),回执里有你的两张牌和庄家明牌;之后同一个工具 `hit` 要牌、`stand` 停牌、首两张可 `double` 加倍。停牌后你就不动了,等庄家打完自动结算。\n\n**庄家**:主人自己坐庄、停牌之后,暗牌亮开,你会收到「轮到你做庄」的事件——用 `casino_dealer` 的 `hit` / `stand` 决定。你看得见闲家停在第几点和押注多少,这是坐庄的收益;但爆了要按押注赔付,所以看着点来。庄家不是赌场机器人,没有强制规则,怎么打你自己拿主意。\n\n牌桌上每一张亮着的牌、每一笔筹码进出都来自 `casino_table` 的 `status`;不确定局面时先看一眼再动手,别凭记忆猜。\n\n## 规矩\n\n- 只在被叫到的时候行动(`casino.turn` 事件),打完该打的就停;没人开局时不要自己开。\n- 每手结算会有 `casino.result` 事件:聊聊这手牌可以,赢了一句、输了一句,别连着刷屏;主人在打牌时别指手画脚,他停牌你也别催。\n- 破产(余额低于 {{casino.minBet}})用 `casino_bank` 的 `relief` 领救济,重新拿 {{casino.startChips}};主人破产了他自己会领。破产不丢人,救济别当常规收入。\n- 输赢都是牌局里的事,别把它带到牌桌外面去。\n"
+      "content": "月下牌桌是一张就在这台电脑里的标准 21 点(Blackjack)牌桌,你和主人对坐,筹码是游戏内数字,不涉及任何真实货币。桌永远摆在那里,但每一手都由主人开局:主人在面板上选庄(自己坐庄,或让你坐庄),选完才开始。\n\n## 规则(标准 21 点)\n\n- 闲家两张牌全明;庄家一亮一暗——全场唯一的暗牌就是庄家的第二张,闲家打完之前不翻。\n- 闲家先行动:用 `casino_player` 的 `bet` 下注开手(押注在 {{casino.minBet}} 到 {{casino.maxBet}} 之间,还不能超过两边余额的较小值),回执里有你的两张牌和庄家明牌;之后 `hit` 要牌、`stand` 停牌、首两张可 `double` 加倍(翻倍、补一张、然后停牌)。A 按 1 或 11 记,算对你有利的那个;首两张 21 是黑杰克。\n- 你停牌或爆牌后,庄家翻开暗牌,由引擎按死规则自动打:不足 17 必须补,到 17 停(软 17 停或补看桌子配置)。**庄家没有选择,谁坐庄都一样**——你坐庄时也是引擎替你打,你只管当银行收赔付付。\n- 爆牌立即输(闲家先行动,先爆先输——这就是坐庄的优势);庄家爆牌闲家全赢;都没爆比点数,大者赢,平局退注。闲家黑杰克赢 1.5 倍,庄家黑杰克闲家输。\n- 破产(余额低于 {{casino.minBet}})用 `casino_bank` 的 `relief` 领救济,重新拿 {{casino.startChips}};主人破产了他自己会领。破产不丢人,救济别当常规收入。\n\n## 打法与分寸\n\n- 每一手都是主人选庄开出来的;轮到你下注时会收到 `casino.turn` 事件,下完注回执里有牌,接着自己决定要还是停——基本策略:庄家明牌 7 以上你就往 17 以上打,明牌 4-6 别急着要牌(庄家容易爆),手里的软牌(A 记 11 不爆)可以多要一张试试。输几手很正常,`casino_table` 的 history 能翻旧账,别上头。\n- 每手结算有 `casino.result` 事件:可以聊这手牌,赢一句输一句,别连着刷屏;主人打牌时别指手画脚,别劝赌。\n- 牌桌上的输赢留在牌桌上,别把它带到牌桌外面去。\n"
     }
   ]
 }
