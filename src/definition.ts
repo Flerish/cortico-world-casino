@@ -16,7 +16,8 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
       casino_bank: { zh: '查筹码账户;破产时领救济金。', en: 'Read the chip account; take bankruptcy relief when broke.' },
     }),
     events: [
-      { type: 'casino.turn', description: { zh: '轮到 AI 下注(它坐闲家时)。', en: 'It is the AI turn to bet as the player.' } },
+      { type: 'casino.turn', description: { zh: '轮到 AI 下注或决定保险(它坐闲家时)。', en: 'It is the AI turn to bet or take insurance as the player.' } },
+      { type: 'casino.action', description: { zh: '主人的一个动作:下注、要牌、停牌、加倍、分牌、保险、投降(AI 坐庄时)。', en: 'One of the owner moves while the AI is the dealer.' } },
       { type: 'casino.result', description: { zh: '一手结算:双方的牌、点数、输赢与筹码变化。', en: 'A hand settled with both sides cards and the chip transfer.' } },
     ],
   },

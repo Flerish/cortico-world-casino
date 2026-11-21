@@ -265,6 +265,7 @@ export class CasinoWorld implements World {
       if (state.phase !== 'betting') return { ok: false, text: '这一手已经开了,别重复下注。' };
       const amount = this.readBet(args.amount);
       if (typeof amount === 'string') return { ok: false, text: amount };
+      this.notifyAction(`主人下注 ${amount},让你坐庄。`);
       const settled = await this.deal(amount);
       this.save();
       this.broadcast();
@@ -279,6 +280,7 @@ export class CasinoWorld implements World {
       if (amount > maxIns) return { ok: false, text: `保险最多 ${maxIns}(底注的一半)。` };
       if (amount > state.ai.chips) return { ok: false, text: `余额 ${state.ai.chips} 付不起 ${amount} 的保险。` };
       state.insurance = amount;
+      this.notifyAction(amount > 0 ? `主人买保险 ${amount}。` : `主人看了眼庄家的明牌 A,决定不买保险。`);
       return await this.resolveInsurance();
     }
     if (state.phase !== 'playerActing') {
@@ -291,10 +293,13 @@ export class CasinoWorld implements World {
     if (action === 'hit') {
       hand.cards.push(this.draw());
       if (handValue(hand.cards).total > 21) hand.stood = true;
+      const value = handValue(hand.cards);
+      this.notifyAction(`主人要牌,拿到 ${formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 })}:闲家手 ${this.cards(hand.cards)}(${value.total} 点${this.bustText(value.total)})。`);
       return await this.advanceOrPlay(hand);
     }
     if (action === 'stand') {
       hand.stood = true;
+      this.notifyAction(`主人停在 ${handValue(hand.cards).total} 点(${this.cards(hand.cards)})。`);
       return await this.advanceOrPlay(hand);
     }
     if (action === 'double') {
@@ -310,6 +315,8 @@ export class CasinoWorld implements World {
       hand.doubled = true;
       hand.cards.push(this.draw());
       hand.stood = true;
+      const value = handValue(hand.cards);
+      this.notifyAction(`主人加倍:注翻到 ${hand.bet},补一张 ${formatCard(hand.cards[hand.cards.length - 1] ?? { rank: 0, suit: 0 })},停在 ${value.total} 点${this.bustText(value.total)}。`);
       return await this.advanceOrPlay(hand);
     }
     if (action === 'split') {
@@ -333,6 +340,7 @@ export class CasinoWorld implements World {
       }
       state.hands = [hand0, hand1];
       state.activeHand = 0;
+      this.notifyAction(`主人把一对同点牌分成两手,各押 ${hand.bet}:一手 ${this.cards(hand0.cards)},二手 ${this.cards(hand1.cards)}${isAce ? ',分 A 各一张即停' : ''}。`);
       if (hand0.stood && hand1.stood) {
         return { ok: true, text: await this.dealerPlayAndSettle() };
       }
@@ -346,9 +354,28 @@ export class CasinoWorld implements World {
       }
       hand.outcome = 'surrender';
       hand.stood = true;
+      this.notifyAction(`主人投降,弃一半注结束这手。`);
       return { ok: true, text: this.settle() };
     }
     return { ok: false, text: `未知动作 ${action};取 bet / hit / stand / double / split / insurance / surrender。` };
+  }
+
+  /** 主人(AI 坐庄时的闲家)做了一个动作:flush 推给 AI,让它即时回应。 */
+  private notifyAction(text: string): void {
+    if (this.state!.aiRole !== 'dealer') return;
+    void this.host?.pushEvent({
+      type: 'casino.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text,
+    }, { trigger: 'flush' });
+  }
+
+  /** 点数超过 21 时的附带说明,否则空串。 */
+  private bustText(total: number): string {
+    return total > 21 ? ',爆' : '';
   }
 
   /** 当前手打完(停/爆/加倍):看后面还有没有手;没有就轮到庄家——但全爆时庄家直接收注,不补牌。 */

@@ -142,6 +142,26 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     const match = stand.match(/你的筹码 (\d+),主人 (\d+)/);
     expect(match?.[1]).toBe('1050');
     expect(match?.[2]).toBe('950');
+    // AI 自己打的手,动作不投事件(结果在回执里)
+    expect((host.events.map((e) => e.type)).filter((t) => t === 'casino.action')).toHaveLength(0);
+    await world.stop();
+  });
+
+  it('AI 坐庄:主人的下注/要牌/停牌都即时推 casino.action(flush),结算推 result', async () => {
+    const world = worldWith(zeroRng);
+    const host = new FakeHost();
+    await world.start(host);
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    await act(world, 'hit'); // ♠6 → 11
+    await act(world, 'stand');
+    const types = host.events.map((e) => e.type);
+    expect(types.filter((t) => t === 'casino.action')).toHaveLength(3);
+    expect(types[types.length - 1]).toBe('casino.result');
+    expect(host.pushOpts.every((o) => o?.trigger === 'flush')).toBe(true);
+    expect(host.events[0]!.text).toContain('主人下注 50');
+    expect(host.events[1]!.text).toContain('拿到 ♠6');
+    expect(host.events[2]!.text).toContain('停在 11 点');
     await world.stop();
   });
 
