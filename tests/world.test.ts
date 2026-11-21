@@ -139,7 +139,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     // 庄家 ♠4♠5=9 → 补 ♠7(16) → 补 ♠8(24) 爆 → 闲(AI)赢
     expect(stand).toContain('庄家 ♠4 ♠5 ♠7 ♠8(24,爆)');
     expect(stand).toContain('净 +50');
-    const match = stand.match(/你的筹码 (\d+),主人 (\d+)/);
+    const match = stand.match(/你的筹码 (\d+),伙伴 (\d+)/);
     expect(match?.[1]).toBe('1050');
     expect(match?.[2]).toBe('950');
     // AI 自己打的手,动作不投事件(结果在回执里)
@@ -147,7 +147,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.stop();
   });
 
-  it('AI 坐庄:主人的下注/要牌/停牌都即时推 casino.action(flush),结算推 result', async () => {
+  it('AI 坐庄:伙伴的下注/要牌/停牌都即时推 casino.action(flush),结算推 result', async () => {
     const world = worldWith(zeroRng);
     const host = new FakeHost();
     await world.start(host);
@@ -159,7 +159,7 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     expect(types.filter((t) => t === 'casino.action')).toHaveLength(3);
     expect(types[types.length - 1]).toBe('casino.result');
     expect(host.pushOpts.every((o) => o?.trigger === 'flush')).toBe(true);
-    expect(host.events[0]!.text).toContain('主人下注 50');
+    expect(host.events[0]!.text).toContain('伙伴下注 50');
     expect(host.events[1]!.text).toContain('拿到 ♠6');
     expect(host.events[2]!.text).toContain('停在 11 点');
     await world.stop();
@@ -435,6 +435,23 @@ describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
     await world.start(new FakeHost());
     const status = await tool(world, 'casino_bank', { action: 'status' });
     expect(status).toContain('Your balance: 1000');
+    await world.stop();
+  });
+
+  it('称呼与桌宠配置对齐:desktop-pet.user 设为主人时,事件与回执用主人', async () => {
+    const deploymentDir = join(scratchDir, 'deployment');
+    mkdirSync(deploymentDir, { recursive: true });
+    writeFileSync(join(deploymentDir, 'config.json'), JSON.stringify({ language: 'zh', worlds: { 'desktop-pet': { user: '主人' } } }), 'utf8');
+    const world = worldWith(zeroRng);
+    const host = new FakeHost();
+    await world.start(host);
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    const actionText = (host.events.filter((e) => e.type === 'casino.action'))[0]!.text;
+    expect(actionText).toContain('主人下注 50');
+    await act(world, 'stand'); // 庄爆,玩家 +50
+    const bank = await tool(world, 'casino_bank', { action: 'status' });
+    expect(bank).toContain('主人余额:1050');
     await world.stop();
   });
 

@@ -12,7 +12,7 @@ import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import { dealerShouldHit, formatCard, handValue, freshDeck, shuffled, type Card } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
-import { modelText, readModelLanguage, type ModelText } from './model-text.ts';
+import { modelText, readModelLanguage, readOwnerLabel, type ModelText } from './model-text.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
   formatHand,
@@ -119,9 +119,10 @@ export class CasinoWorld implements World {
 
   constructor(private readonly opts: CasinoWorldOptions) {}
 
-  /** 模型文字:按部署 config.json 的 language 每次现读,改语言无需重启。 */
+  /** 模型文字:语言与称呼都跟桌宠配置对齐,每次现读,改语言/称呼无需重启。 */
   private mt(): ModelText {
-    return modelText(readModelLanguage(this.opts.botDir));
+    const language = readModelLanguage(this.opts.botDir);
+    return modelText(language, readOwnerLabel(this.opts.botDir, language));
   }
 
   /** 只报值;前缀文本一律来自 ENV_PROMPT 模板(按模型语言选文件)。 */
