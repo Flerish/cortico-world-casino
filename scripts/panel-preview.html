@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>月下牌桌 · 面板预览(真实 bundle)</title>
+<style>
+  body { background: #101418; padding: 24px; font-family: system-ui, sans-serif; }
+  #panel { max-width: 560px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="panel"></div>
+<script type="module">
+  // 用假宿主跑真实打包产物:验证面板渲染与规则浮层。
+  const root = document.getElementById('panel');
+  const snapshot = {
+    version: 7, phase: 'idle', round: 3, aiRole: 'dealer', bet: 0, insurance: 0,
+    holeRevealed: true, dealerActing: false,
+    hands: [{ cards: ['♠K', '♥9'], total: 19, bet: 50, doubled: false, outcome: 'win', active: false, fromSplit: false }],
+    activeHand: 0,
+    dealerCards: ['♦Q', '♣4', '♥6'], dealerVisibleTotal: null, dealerTotal: 20, holeCount: 0,
+    ai: { chips: 950, wins: 0, losses: 1, pushes: 0, net: -50, bankruptcies: 0, role: 'dealer' },
+    player: { chips: 1050, wins: 1, losses: 0, pushes: 0, net: 50, bankruptcies: 0, role: 'player' },
+    minBet: 10, maxBet: 200, startChips: 1000, dealerHitsSoft17: false,
+    lastResult: { dealer: 'ai', round: 3, bet: 50, hands: [{ cards: ['♠K', '♥9'], bet: 50, outcome: 'win' }], dealerCards: ['♦Q', '♣4', '♥6'], insurance: 0, insuranceWon: false, delta: 50, surrendered: false, at: '' },
+    history: [{ dealer: 'ai', round: 3, bet: 50, hands: [{ cards: ['♠K', '♥9'], bet: 50, outcome: 'win' }], dealerCards: ['♦Q', '♣4', '♥6'], insurance: 0, insuranceWon: false, delta: 50, surrendered: false, at: '' }],
+  };
+  const ctx = {
+    root,
+    signal: new AbortController().signal,
+    language: 'zh',
+    pageId: 'world:casino',
+    panelId: 'table',
+    async invoke(method) {
+      if (method === 'state') return snapshot;
+      throw new Error('stub');
+    },
+    stream(handlers) {
+      handlers.message(JSON.stringify(snapshot));
+      return { dispose() {} };
+    },
+  };
+  const mod = await import('./webui.js');
+  await mod.default.panels.table.mount(ctx);
+  window.__panelReady = true;
+</script>
+</body>
+</html>

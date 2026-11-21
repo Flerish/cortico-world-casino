@@ -140,8 +140,10 @@ async function send(ctx: WebUiPanelContext, action: string, extra: Record<string
   }
 }
 
-/** 界面本地状态:下注输入与历史折叠;换手时下注清零。 */
-const ui = { bet: 0, historyOpen: false };
+/** 界面本地状态:下注输入、历史折叠与规则浮层;换手时下注清零。 */
+const ui = { bet: 0, historyOpen: false, rulesOpen: false };
+/** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
+let current: Snapshot | null = null;
 
 function resultBanner(state: Snapshot): HTMLElement | null {
   const last = state.lastResult;
@@ -163,16 +165,31 @@ function resultBanner(state: Snapshot): HTMLElement | null {
 }
 
 function render(ctx: WebUiPanelContext, state: Snapshot): void {
+  current = state;
   if (state.phase !== 'betting') ui.bet = 0;
   const root = ctx.root;
   root.replaceChildren();
 
   const style = el('style');
   style.textContent = `
-    .casino-wrap { max-width: 560px; margin: 0 auto; }
+    .casino-wrap { max-width: 560px; margin: 0 auto; position: relative; }
     .casino-topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
     .casino-title { font-weight: 700; font-size: 15px; }
     .casino-round { opacity: .7; font-size: 12px; }
+    .rules-btn { border: 1px solid rgba(0,0,0,.25); background: #efe9d8; border-radius: 999px;
+      padding: 3px 12px; font-size: 12px; cursor: pointer; font-weight: 600; flex: none; }
+    .rules-overlay { position: absolute; inset: 0; background: rgba(8,12,9,.74); z-index: 6;
+      display: flex; align-items: flex-start; justify-content: center; padding: 16px; overflow: auto;
+      border-radius: 12px; }
+    .rules-card { background: #f7f3e6; color: #2c2820; border-radius: 12px; max-width: 470px; width: 100%;
+      padding: 14px 18px 12px; font-size: 13px; line-height: 1.55; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+    .rules-card h4 { margin: 10px 0 4px; font-size: 13px; color: #8a3030; }
+    .rules-card h4:first-child { margin-top: 2px; }
+    .rules-card ul { margin: 2px 0 2px 18px; padding: 0; }
+    .rules-card li { margin: 2px 0; }
+    .rules-card p { margin: 4px 0; }
+    .rules-close { margin-top: 10px; width: 100%; padding: 8px; border-radius: 8px;
+      border: 1px solid rgba(0,0,0,.25); background: #c8a44a; font-weight: 700; cursor: pointer; }
     .felt { border-radius: 16px; border: 7px solid #4a3220; background:
       radial-gradient(ellipse at 50% 38%, #208652 0%, #14603a 55%, #0c4527 100%);
       box-shadow: inset 0 0 46px rgba(0,0,0,.5), 0 3px 10px rgba(0,0,0,.25);
@@ -252,6 +269,13 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     ? '还没开局'
     : state.aiRole === 'dealer' ? 'AI 坐庄 · 你是闲家' : '你坐庄(按规则自动打)· AI 是闲家';
   topbar.append(el('span', 'casino-round', `${state.round > 0 ? `第 ${state.round} 手 · ` : ''}${roleText} · ${state.dealerHitsSoft17 ? 'H17' : 'S17'}`));
+  const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? '收起规则' : '规则说明');
+  rulesBtn.type = 'button';
+  rulesBtn.addEventListener('click', () => {
+    ui.rulesOpen = !ui.rulesOpen;
+    if (current) render(ctx, current);
+  }, { signal: ctx.signal });
+  topbar.append(rulesBtn);
   wrap.append(topbar);
 
   // ── 绿呢桌面 ──
@@ -503,8 +527,56 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   history.append(list);
   wrap.append(history);
 
+  // ── 规则浮层 ──
+  if (ui.rulesOpen) wrap.append(buildRules(ctx));
+
   // ── 错误条 ──
   wrap.append(el('div', 'casino-error'));
+}
+
+/** 规则说明浮层:右上角按钮展开,庄闲分工、点数、动作与结算一览。 */
+function buildRules(ctx: WebUiPanelContext): HTMLElement {
+  const overlay = el('div', 'rules-overlay');
+  const card = el('div', 'rules-card');
+  const tpl = document.createElement('template');
+  tpl.innerHTML = `
+    <h4>怎么开局</h4>
+    <p>点「让 AI 坐庄」或「我坐庄」→ 闲家下注 → 发牌(闲家两张全明,庄家一亮一暗)→ 闲家行动 → 庄家按规则打 → 结算。</p>
+    <h4>庄闲怎么分工</h4>
+    <ul>
+      <li><b>AI 坐庄 = 你来决策:</b>你当闲家,下注、要牌、停牌、加倍、分牌、保险、投降都由你在面板操作;AI 当银行,按规则自动打。</li>
+      <li><b>我坐庄 = AI 来打:</b>你当银行不决策,收注与赔付;AI 作为闲家自己下注、要牌、停牌;你的庄家手由引擎按规则自动补牌。</li>
+    </ul>
+    <h4>点数</h4>
+    <ul>
+      <li>A 按 1 或 11 记(算有利的那个);J / Q / K 记 10。</li>
+      <li>首两张 21 = 黑杰克;庄家不足 17 必须补,到 17 停(软 17 停或补看设置,右上角标 S17 / H17)。</li>
+    </ul>
+    <h4>闲家动作</h4>
+    <ul>
+      <li><b>要牌 / 停牌:</b>爆牌立即输。</li>
+      <li><b>加倍:</b>一手的前两张,翻倍、补一张、停牌。</li>
+      <li><b>分牌:</b>同点两张分成两手,各配同额注、各补一张;分 A 各一张即停;分牌后的 21 不算黑杰克;限一次。</li>
+      <li><b>保险:</b>庄家亮 A 时可买(最多底注一半);庄家是黑杰克按 2:1 赔,否则被收走。</li>
+      <li><b>投降:</b>开局的前两张、还没动作时可弃一半注结束。</li>
+    </ul>
+    <h4>结算</h4>
+    <ul>
+      <li>闲家先行动,先爆先输;庄家爆牌闲家全赢;比点大者赢;平局退注。</li>
+      <li>闲家黑杰克赔 1.5 倍;庄家黑杰克闲输;双方黑杰克平。</li>
+      <li>筹码低于最小注算破产,可领救济金重新来;筹码是游戏数字,不涉及真钱。</li>
+    </ul>
+  `;
+  card.append(tpl.content.cloneNode(true));
+  const close = el('button', 'rules-close', '知道了,继续');
+  close.type = 'button';
+  close.addEventListener('click', () => {
+    ui.rulesOpen = false;
+    if (current) render(ctx, current);
+  }, { signal: ctx.signal });
+  card.append(close);
+  overlay.append(card);
+  return overlay;
 }
 
 export default {

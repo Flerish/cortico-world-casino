@@ -12,7 +12,10 @@ createServer(async (req, res) => {
   try {
     const rel = req.url === '/' ? '/card-preview.html' : req.url;
     const name = decodeURIComponent(rel.split('?')[0] ?? '/');
-    const file = name === '/card-face.jpg' || name === '/card-back.jpg' ? join(assets, name.slice(1)) : join(here, name);
+    let file;
+    if (name === '/card-face.jpg' || name === '/card-back.jpg') file = join(assets, name.slice(1));
+    else if (name === '/webui.js') file = join(here, '..', 'dist', 'webui.js');
+    else file = join(here, name);
     const bytes = await readFile(file);
     res.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' });
     res.end(bytes);
