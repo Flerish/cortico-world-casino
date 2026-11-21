@@ -1,5 +1,5 @@
 /**
- * 月下牌桌的面板:棋牌游戏布局。绿呢桌面 + CSS 扑克牌面 + 筹码 + 按阶段启用的按钮。
+ * 月下牌桌的面板:棋牌游戏布局。绿呢桌面 + CSS 扑克牌面(手绘素材)+ 筹码 + 按阶段启用的按钮。
  * 对 cortico/* 只允许 import type;运行时值由包自带(装载器规范)。
  */
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
@@ -16,27 +16,39 @@ interface SeatView {
   role: 'dealer' | 'player' | null;
 }
 
+interface HandView {
+  cards: string[];
+  total: number | null;
+  bet: number;
+  doubled: boolean;
+  outcome: string | null;
+  active: boolean;
+  fromSplit: boolean;
+}
+
 interface HandRecordView {
   dealer: 'ai' | 'player';
   round: number;
   bet: number;
-  playerCards: string[];
+  hands: Array<{ cards: string[]; bet: number; outcome: string }>;
   dealerCards: string[];
-  outcome: string;
+  insurance: number;
+  insuranceWon: boolean;
   delta: number;
+  surrendered: boolean;
   at: string;
 }
 
 interface Snapshot {
   version: number;
-  phase: 'idle' | 'betting' | 'playerActing';
+  phase: 'idle' | 'betting' | 'insurance' | 'playerActing';
   round: number;
   aiRole: 'dealer' | 'player' | null;
   bet: number;
-  doubled: boolean;
+  insurance: number;
   holeRevealed: boolean;
-  playerCards: string[];
-  playerTotal: number | null;
+  hands: HandView[];
+  activeHand: number;
   dealerCards: string[];
   dealerVisibleTotal: number | null;
   dealerTotal: number | null;
@@ -52,11 +64,12 @@ interface Snapshot {
 }
 
 const OUTCOME_ZH: Record<string, string> = {
-  win: '闲家赢',
-  lose: '庄家赢',
-  push: '平局',
+  win: '赢',
+  lose: '输',
+  push: '平',
   blackjack: '黑杰克',
   bust: '爆牌',
+  surrender: '投降',
 };
 
 const ROLE_ZH: Record<string, string> = { dealer: '庄家', player: '闲家' };
@@ -68,8 +81,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return node;
 }
 
-/** 手绘素材:正面模板 + 花纹牌背(esbuild dataurl 内联)。 */
-
+/** 一张扑克牌:text 形如 ♠K;hidden 时画手绘牌背。亮牌 = 模板图 + 角标与中央花色叠加。 */
 function imgEl(url: string): HTMLImageElement {
   const img = document.createElement('img');
   img.src = url;
@@ -80,7 +92,6 @@ function imgEl(url: string): HTMLImageElement {
 
 const SUIT_TONE: Record<string, string> = { '♠': 'idx-black', '♣': 'idx-black', '♥': 'idx-red', '♦': 'idx-red' };
 
-/** 一张扑克牌:text 形如 ♠K;hidden 时画手绘牌背。亮牌 = 模板图 + 角标与中央花色叠加。 */
 function cardEl(text: string, hidden = false): HTMLElement {
   const card = el('div', 'pcard');
   if (hidden) {
@@ -110,6 +121,10 @@ function statLine(seat: SeatView): string {
   return `${seat.wins}胜 ${seat.losses}负 ${seat.pushes}平 · 净${seat.net >= 0 ? '+' : ''}${seat.net}`;
 }
 
+function outcomePill(outcome: string): HTMLElement {
+  return el('span', `outcome-pill ${outcome}`, OUTCOME_ZH[outcome] ?? outcome);
+}
+
 function showError(ctx: WebUiPanelContext, message: string): void {
   const box = ctx.root.querySelector('[data-error]');
   if (box) box.textContent = message;
@@ -127,13 +142,20 @@ async function send(ctx: WebUiPanelContext, action: string, extra: Record<string
 /** 界面本地状态:下注输入与历史折叠;换手时下注清零。 */
 const ui = { bet: 0, historyOpen: false };
 
-function outcomeBanner(state: Snapshot): HTMLElement | null {
+function resultBanner(state: Snapshot): HTMLElement | null {
   const last = state.lastResult;
   if (!last || state.phase !== 'idle') return null;
   const playerDelta = last.dealer === 'ai' ? last.delta : -last.delta;
-  const banner = el('div', `banner ${last.outcome === 'push' ? 'push' : playerDelta > 0 ? 'win' : 'lose'}`);
-  const pill = el('span', `outcome-pill ${last.outcome}`, OUTCOME_ZH[last.outcome] ?? last.outcome);
-  const text = el('span', 'banner-text', `第 ${last.round} 手 · 押 ${last.bet} · 闲 ${last.playerCards.join(' ')} 对 庄 ${last.dealerCards.join(' ')}`);
+  const banner = el('div', `banner ${last.surrendered ? 'lose' : playerDelta > 0 ? 'win' : playerDelta === 0 ? 'push' : 'lose'}`);
+  const mainOutcome = last.hands.length > 1
+    ? (playerDelta > 0 ? 'win' : playerDelta < 0 ? 'lose' : 'push')
+    : last.hands[0]?.outcome ?? 'push';
+  const pill = outcomePill(mainOutcome);
+  const handsText = last.hands
+    .map((h) => `${h.cards.join(' ')}(${OUTCOME_ZH[h.outcome] ?? h.outcome})`)
+    .join(' / ');
+  const insText = last.insurance > 0 ? ` · 保险 ${last.insurance}${last.insuranceWon ? '赢' : '输'}` : '';
+  const text = el('span', 'banner-text', `第 ${last.round} 手 · 押 ${last.bet}${insText} · 闲 ${handsText} 对 庄 ${last.dealerCards.join(' ')}`);
   const delta = el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`);
   banner.append(pill, text, delta);
   return banner;
@@ -158,19 +180,22 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .seat-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
     .seat-role { background: rgba(0,0,0,.32); padding: 1px 9px; border-radius: 999px; font-size: 11px; }
     .seatstats { font-size: 11px; opacity: .7; }
+    .hands { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    .hand { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 5px 7px;
+      border-radius: 8px; border: 1px solid transparent; }
+    .hand.active { border-color: rgba(244,239,226,.65); background: rgba(0,0,0,.18); }
     .cards { display: flex; gap: 7px; min-height: 80px; align-items: center; }
-    .pcard { width: 56px; height: 79px; border-radius: 6px; position: relative; flex: none; overflow: hidden;
+    .pcard { width: 52px; height: 73px; border-radius: 6px; position: relative; flex: none; overflow: hidden;
       background: #14120d; box-shadow: 0 2px 5px rgba(0,0,0,.45); }
     .cardimg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
     .idx { position: absolute; top: 3px; left: 5px; line-height: 1; text-align: center;
       text-shadow: 0 1px 0 rgba(255,255,255,.45); }
     .idx-flip { top: auto; left: auto; bottom: 3px; right: 5px; transform: rotate(180deg); }
-    .idx-rank { font-size: 14px; font-weight: 800; font-family: Georgia, 'Times New Roman', serif; }
-    .idx-suit { font-size: 11px; }
+    .idx-rank { font-size: 13px; font-weight: 800; font-family: Georgia, 'Times New Roman', serif; }
+    .idx-suit { font-size: 10px; }
     .idx-black { color: #1d2f55; } .idx-red { color: #a52a35; }
     .pip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-      font-size: 30px; text-shadow: 0 1px 0 rgba(255,255,255,.45); }
-    .pcard.hole-gap { margin-right: 10px; }
+      font-size: 28px; text-shadow: 0 1px 0 rgba(255,255,255,.45); }
     .total-pill { background: rgba(0,0,0,.34); border-radius: 999px; padding: 2px 12px; font-size: 12px; }
     .pot { display: flex; justify-content: center; margin: 10px 0; }
     .pot-inner { background: rgba(0,0,0,.30); border: 1px dashed rgba(244,239,226,.45); border-radius: 12px;
@@ -187,6 +212,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .outcome-pill.win, .outcome-pill.blackjack { background: #2c7a4b; color: #fff; }
     .outcome-pill.lose, .outcome-pill.bust { background: #a33848; color: #fff; }
     .outcome-pill.push { background: #77735f; color: #fff; }
+    .outcome-pill.surrender { background: #4a4438; color: #fff; }
     .delta { font-weight: 700; flex: none; }
     .delta.up { color: #9fe6bd; } .delta.down { color: #f0b9c4; }
     .btnrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
@@ -224,18 +250,18 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   const roleText = state.aiRole === null
     ? '还没开局'
     : state.aiRole === 'dealer' ? 'AI 坐庄 · 你是闲家' : '你坐庄(按规则自动打)· AI 是闲家';
-  topbar.append(el('span', 'casino-round', state.round > 0 ? `第 ${state.round} 手 · ${roleText}` : roleText));
+  topbar.append(el('span', 'casino-round', `${state.round > 0 ? `第 ${state.round} 手 · ` : ''}${roleText} · ${state.dealerHitsSoft17 ? 'H17' : 'S17'}`));
   wrap.append(topbar);
 
   // ── 绿呢桌面 ──
   const felt = el('div', 'felt');
   wrap.append(felt);
 
+  const dealerIsAi = state.aiRole !== 'player';
   const dealerSeatView = state.aiRole === 'player' ? state.player : state.ai;
   const playerSeatView = state.aiRole === 'player' ? state.ai : state.player;
   const dealerRole = state.aiRole === null ? null : 'dealer';
   const playerRole = state.aiRole === null ? null : state.aiRole === 'dealer' ? 'player' : 'dealer';
-  const dealerIsAi = state.aiRole !== 'player';
 
   // 庄家席(上)
   const dealerSeat = el('div', 'seat');
@@ -244,14 +270,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   if (dealerRole) dealerHead.append(el('span', 'seat-role', ROLE_ZH[dealerRole]!));
   dealerSeat.append(dealerHead);
   const dealerCards = el('div', 'cards');
-  state.dealerCards.forEach((text, i) => {
-    const card = cardEl(text);
-    if (state.holeCount > 0 && i === state.dealerCards.length - 1) card.classList.add('hole-gap');
-    dealerCards.append(card);
-  });
   if (state.phase !== 'idle' && state.dealerCards.length === 0) dealerCards.append(cardEl('', true));
+  for (const text of state.dealerCards) dealerCards.append(cardEl(text));
   for (let i = 0; i < state.holeCount; i++) dealerCards.append(cardEl('', true));
-  if (state.phase === 'idle' && state.round === 0) dealerCards.append(el('span', 'seatstats', '等待开局…'));
+  if (state.phase === 'idle' && state.round === 0) dealerCards.append(el('span', 'seatstats', '庄家按固定规则自动打'));
   dealerSeat.append(dealerCards);
   if (state.holeRevealed && state.dealerTotal !== null) {
     dealerSeat.append(el('div', 'total-pill', `庄家 ${state.dealerTotal} 点`));
@@ -271,26 +293,41 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     potInner.append(el('div', undefined, state.round > 0 ? '一手已结,选庄再开' : '选庄开局'));
     potInner.append(el('div', 'pot-num', `各 ${state.minBet} 起押`));
   } else {
-    potInner.append(el('div', undefined, '本手押注'));
-    potInner.append(el('div', 'pot-num', String(state.bet) + (state.doubled ? '(已加倍)' : '')));
+    potInner.append(el('div', undefined, `本手底注${state.insurance > 0 ? ` · 保险 ${state.insurance}` : ''}`));
+    potInner.append(el('div', 'pot-num', String(state.bet)));
   }
   pot.append(potInner);
   felt.append(pot);
 
-  // 闲家席(下)
+  // 闲家席(下):分牌后多手并排
   const playerSeat = el('div', 'seat');
   const playerHead = el('div', 'seat-head');
   playerHead.append(el('span', undefined, dealerIsAi ? '我' : 'AI'));
   if (playerRole) playerHead.append(el('span', 'seat-role', ROLE_ZH[playerRole]!));
   playerSeat.append(playerHead);
-  const playerCards = el('div', 'cards');
-  if (state.phase !== 'idle' && state.playerCards.length === 0) playerCards.append(cardEl('', true));
-  for (const text of state.playerCards) playerCards.append(cardEl(text));
-  if (state.phase === 'idle' && state.round === 0) playerCards.append(el('span', 'seatstats', '闲家先行动;坐庄按固定规则自动打'));
-  playerSeat.append(playerCards);
-  if (state.playerTotal !== null) {
-    playerSeat.append(el('div', 'total-pill', `闲家 ${state.playerTotal} 点`));
+  const handsWrap = el('div', 'hands');
+  if (state.phase !== 'idle' && state.hands.length === 0) {
+    const single = el('div', 'hand');
+    const cards = el('div', 'cards');
+    cards.append(cardEl('', true));
+    single.append(cards);
+    handsWrap.append(single);
   }
+  if (state.phase === 'idle' && state.round === 0) {
+    const single = el('div', 'hand');
+    single.append(el('span', 'seatstats', '闲家先行动;坐庄按固定规则自动打'));
+    handsWrap.append(single);
+  }
+  for (const hand of state.hands) {
+    const box = el('div', `hand${hand.active ? ' active' : ''}`);
+    const cards = el('div', 'cards');
+    for (const text of hand.cards) cards.append(cardEl(text));
+    box.append(cards);
+    box.append(el('div', 'total-pill', `${hand.total ?? ''} 点 · 押 ${hand.bet}${hand.doubled ? '(加倍)' : ''}`));
+    if (hand.outcome) box.append(outcomePill(hand.outcome));
+    handsWrap.append(box);
+  }
+  playerSeat.append(handsWrap);
   const playerFoot = el('div', 'seat-head');
   playerFoot.append(chipsEl('筹码', playerSeatView.chips, dealerIsAi ? 'chip-gold' : 'chip-blue'));
   playerFoot.append(el('span', 'seatstats', statLine(playerSeatView)));
@@ -300,18 +337,15 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   // ── 结果横幅(结算后)──
   const bannerBox = el('div');
   wrap.append(bannerBox);
-  const resultBanner = outcomeBanner(state);
-  if (resultBanner) bannerBox.append(resultBanner);
+  const banner = resultBanner(state);
+  if (banner) bannerBox.append(banner);
 
   // ── 等待 AI 的横幅 ──
   const waitingAi =
-    (state.phase === 'betting' && state.aiRole === 'player') ||
-    (state.phase === 'playerActing' && state.aiRole === 'player');
+    (state.phase === 'betting' || state.phase === 'insurance') && state.aiRole === 'player';
   if (waitingAi) {
     const wait = el('div', 'banner wait');
-    wait.append(el('span', 'banner-text', state.phase === 'betting'
-      ? '等 AI 下注…(它已收到通知)'
-      : 'AI 思考出牌中…'));
+    wait.append(el('span', 'banner-text', state.phase === 'betting' ? '等 AI 下注…(它已收到通知)' : '等 AI 决定保险…(它已收到通知)'));
     const nudge = el('button', undefined, '催一下');
     nudge.type = 'button';
     nudge.addEventListener('click', () => void send(ctx, 'nudge'), { signal: ctx.signal });
@@ -319,10 +353,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     bannerBox.append(wait);
   }
 
-  // ── 按阶段给操作 ──
   const playerIsIdler = state.aiRole === 'dealer';
   const playerBroke = state.player.chips < state.minBet && state.phase === 'idle';
 
+  // ── 按阶段给操作 ──
   if (state.phase === 'idle') {
     const row = el('div', 'btnrow');
     const aiDealer = el('button', 'primary', '让 AI 坐庄');
@@ -381,12 +415,35 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     go.addEventListener('click', () => void send(ctx, 'bet', { amount: ui.bet }), { signal: ctx.signal });
     row.append(clear, go);
     wrap.append(row);
-    sync();
   } else if (state.phase === 'betting') {
-    const banner = el('div', 'banner wait');
-    banner.append(el('span', 'banner-text', '等 AI 下注…'));
-    wrap.append(banner);
+    const banner2 = el('div', 'banner wait');
+    banner2.append(el('span', 'banner-text', '等 AI 下注…'));
+    wrap.append(banner2);
+  } else if (state.phase === 'insurance' && playerIsIdler) {
+    const maxIns = Math.floor(state.bet / 2);
+    const banner2 = el('div', 'banner wait');
+    banner2.append(el('span', 'banner-text', `庄家亮 A:买保险吗?最多 ${maxIns},庄家黑杰克按 2:1 赔。`));
+    wrap.append(banner2);
+    const row = el('div', 'btnrow');
+    const decline = el('button', undefined, '不买');
+    decline.type = 'button';
+    decline.addEventListener('click', () => void send(ctx, 'insurance', { amount: 0 }), { signal: ctx.signal });
+    const buy = el('button', 'primary', `买保险 ${maxIns}`);
+    buy.type = 'button';
+    buy.disabled = maxIns <= 0;
+    buy.addEventListener('click', () => void send(ctx, 'insurance', { amount: maxIns }), { signal: ctx.signal });
+    row.append(decline, buy);
+    wrap.append(row);
+  } else if (state.phase === 'insurance') {
+    const banner2 = el('div', 'banner wait');
+    banner2.append(el('span', 'banner-text', '等 AI 决定保险…'));
+    wrap.append(banner2);
   } else if (state.phase === 'playerActing' && playerIsIdler) {
+    const active = state.hands[state.activeHand];
+    const singleFresh = state.hands.length === 1 && (active?.cards.length ?? 0) === 2;
+    const canSplit = singleFresh
+      && active!.cards.length === 2
+      && active!.cards[0]!.slice(1) === active!.cards[1]!.slice(1);
     const row = el('div', 'btnrow');
     const hit = el('button', 'primary', '要牌');
     hit.type = 'button';
@@ -394,16 +451,24 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     stand.type = 'button';
     const dbl = el('button', undefined, '加倍');
     dbl.type = 'button';
-    dbl.disabled = state.playerCards.length !== 2;
+    dbl.disabled = (active?.cards.length ?? 0) !== 2;
+    const split = el('button', undefined, '分牌');
+    split.type = 'button';
+    split.disabled = !canSplit;
+    const surrender = el('button', 'danger', '投降');
+    surrender.type = 'button';
+    surrender.disabled = !singleFresh;
     hit.addEventListener('click', () => void send(ctx, 'hit'), { signal: ctx.signal });
     stand.addEventListener('click', () => void send(ctx, 'stand'), { signal: ctx.signal });
     dbl.addEventListener('click', () => void send(ctx, 'double'), { signal: ctx.signal });
-    row.append(hit, stand, dbl);
+    split.addEventListener('click', () => void send(ctx, 'split'), { signal: ctx.signal });
+    surrender.addEventListener('click', () => void send(ctx, 'surrender'), { signal: ctx.signal });
+    row.append(hit, stand, dbl, split, surrender);
     wrap.append(row);
   } else if (state.phase === 'playerActing') {
-    const banner = el('div', 'banner wait');
-    banner.append(el('span', 'banner-text', 'AI 出牌中…'));
-    wrap.append(banner);
+    const banner2 = el('div', 'banner wait');
+    banner2.append(el('span', 'banner-text', 'AI 出牌中…'));
+    wrap.append(banner2);
   }
 
   // ── 历史 ──
@@ -421,11 +486,13 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   for (const record of state.history) {
     const line = el('div', 'history-line');
     line.append(el('span', undefined, `第${record.round}手 庄:${record.dealer === 'ai' ? 'AI' : '我'} 押 ${record.bet}`));
-    line.append(el('span', 'history-cards', `闲 ${record.playerCards.join(' ')} 对 庄 ${record.dealerCards.join(' ')}`));
-    const pill = el('span', `outcome-pill ${record.outcome}`, OUTCOME_ZH[record.outcome] ?? record.outcome);
-    line.append(pill);
-    const idlerDelta = record.dealer === 'ai' ? record.delta : -record.delta;
-    line.append(el('span', `delta ${idlerDelta >= 0 ? 'up' : 'down'}`, `${idlerDelta >= 0 ? '+' : ''}${idlerDelta}`));
+    const handsText = record.hands.map((h) => `${h.cards.join(' ')}(${OUTCOME_ZH[h.outcome] ?? h.outcome})`).join(' / ');
+    line.append(el('span', 'history-cards', `闲 ${handsText} 对 庄 ${record.dealerCards.join(' ')}`));
+    if (record.insurance > 0) {
+      line.append(el('span', undefined, `保险 ${record.insurance}${record.insuranceWon ? '赢' : '输'}`));
+    }
+    const playerDelta = record.dealer === 'ai' ? record.delta : -record.delta;
+    line.append(el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`));
     list.append(line);
   }
   history.append(list);

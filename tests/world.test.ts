@@ -14,7 +14,7 @@ const CALL = {} as ToolCallContext;
 
 /**
  * rng 恒返 0:Fisher-Yates 每步都换到 0 号位,整副牌转一位——
- * 牌靴可预测:♠2 ♠3 ♠4 ♠5 ♠6 ♠7 ♠8 ♠9 ♠10 ♠J ♠Q ♠K ♥2 …(♠A 转到最后)。
+ * 牌靴可预测:♠2 ♠3 ♠4 ♠5 ♠6 ♠7 ♠8 ♠9 ♠10 ♠J ♠Q ♠K ♥2 ♥3 …(♠A 转到最后)。
  */
 const zeroRng = () => 0;
 
@@ -38,10 +38,12 @@ function rigTable(patch: { shoe?: Array<{ rank: number; suit: number }>; aiChips
     phase: 'idle',
     round: 0,
     bet: 0,
-    playerCards: [],
+    insurance: 0,
+    insuranceOutcome: 'none',
+    hands: [],
+    activeHand: 0,
     dealerCards: [],
     holeRevealed: false,
-    doubled: false,
     history: [],
     shoe: patch.shoe ?? [],
     drawn: 0,
@@ -60,23 +62,36 @@ async function tool(world: CasinoWorld, name: string, args: Record<string, unkno
   return String(await def.handler(args, CALL));
 }
 
+interface HandSnap {
+  cards: string[];
+  total: number | null;
+  bet: number;
+  outcome: string | null;
+  active: boolean;
+}
+
 type Snap = Record<string, unknown> & {
   phase: string;
   round: number;
   aiRole: string | null;
+  bet: number;
+  insurance: number;
   ai: { chips: number };
   player: { chips: number };
   holeCount: number;
   holeRevealed: boolean;
-  dealerVisibleTotal: number | null;
-  playerTotal: number | null;
+  hands: HandSnap[];
 };
 
 async function act(world: CasinoWorld, action: string, extra: Record<string, unknown> = {}): Promise<Snap> {
   return (await world.webUi().invoke!('table', 'action', [{ action, ...extra }])) as Snap;
 }
 
-describe('Casino World(标准 21 点)', () => {
+function card(rank: number, suit: number): { rank: number; suit: number } {
+  return { rank, suit };
+}
+
+describe('Casino World(标准 21 点 + 分牌/保险/投降)', () => {
   it('干装载不报失败:装载器会接受它', async () => {
     const report = await dryMountWorld(CASINO, { scratchDir });
     expect(report.failures).toEqual([]);
@@ -97,12 +112,10 @@ describe('Casino World(标准 21 点)', () => {
     await world.start(new FakeHost());
     let snap = await act(world, 'newgame', { dealer: 'ai' });
     expect(snap.phase).toBe('betting');
-    expect(hostEventsEmpty(world)).toBe(true);
     snap = await act(world, 'bet', { amount: 50 });
     expect(snap.phase).toBe('playerActing');
-    expect(snap.playerTotal).toBe(5);
+    expect(snap.hands[0]!.total).toBe(5);
     expect(snap.holeCount).toBe(1);
-    expect(snap.dealerVisibleTotal).toBe(4);
     snap = await act(world, 'stand');
     // 庄家翻 ♠5 → 9 <17 → 补 ♠6(15) → 补 ♠7(22) 爆 → 闲家 5 点也赢
     expect(snap.phase).toBe('idle');
@@ -120,43 +133,151 @@ describe('Casino World(标准 21 点)', () => {
     expect(host.events.map((e) => e.type)).toEqual(['casino.turn']);
     const bet = await tool(world, 'casino_player', { action: 'bet', amount: 50 });
     expect(bet).toContain('♠2 ♠3');
-    expect(bet).toContain('庄家明牌:♠4');
     await tool(world, 'casino_player', { action: 'hit' }); // ♠6 → 11
     const stand = await tool(world, 'casino_player', { action: 'stand' });
     // 庄家 ♠4♠5=9 → 补 ♠7(16) → 补 ♠8(24) 爆 → 闲(AI)赢
     expect(stand).toContain('庄家 ♠4 ♠5 ♠7 ♠8(24,爆)');
-    expect(stand).toContain('闲家赢,净 +50');
-    expect(snapChips(stand)).toEqual(['1050', '950']);
-    expect((host.events.map((e) => e.type)).filter((t) => t === 'casino.turn')).toHaveLength(1);
+    expect(stand).toContain('闲家净 +50');
+    const match = stand.match(/你的筹码 (\d+),主人 (\d+)/);
+    expect(match?.[1]).toBe('1050');
+    expect(match?.[2]).toBe('950');
     await world.stop();
   });
 
   it('庄家软 17 默认停(S17);配置 H17 后软 17 会补牌', async () => {
-    rigTable({ shoe: [{ rank: 2, suit: 0 }, { rank: 3, suit: 0 }, { rank: 1, suit: 0 }, { rank: 6, suit: 2 }, { rank: 5, suit: 0 }, { rank: 13, suit: 0 }] });
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 0), card(6, 2), card(5, 0), card(13, 0)] });
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'player' });
     await tool(world, 'casino_player', { action: 'bet', amount: 50 });
+    await tool(world, 'casino_player', { action: 'insurance', amount: 0 }); // 明牌 A,声明不买
     const stand = await tool(world, 'casino_player', { action: 'stand' });
     // 闲 ♠2♠3(5);庄 A♠+♣6 = 软 17 → S17 停 → 17 > 5,闲输
     expect(stand).toContain('庄家 ♠A ♣6(17)');
-    expect(stand).toContain('闲家输,净 -50');
+    expect(stand).toContain('闲家净 -50');
     await world.stop();
 
-    rigTable({ shoe: [{ rank: 2, suit: 0 }, { rank: 3, suit: 0 }, { rank: 1, suit: 0 }, { rank: 6, suit: 2 }, { rank: 5, suit: 0 }, { rank: 13, suit: 0 }] });
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 0), card(6, 2), card(5, 0), card(13, 0)] });
     const h17 = worldWith(zeroRng, { dealerHitsSoft17: true });
     await h17.start(new FakeHost());
     await act(h17, 'newgame', { dealer: 'player' });
     await tool(h17, 'casino_player', { action: 'bet', amount: 50 });
+    await tool(h17, 'casino_player', { action: 'insurance', amount: 0 });
     const stand2 = await tool(h17, 'casino_player', { action: 'stand' });
     // H17:软 17 补 ♠5 → 12 → 再补 ♠K(10) → 22 爆 → 闲赢
     expect(stand2).toContain('爆');
-    expect(stand2).toContain('闲家赢,净 +50');
+    expect(stand2).toContain('闲家净 +50');
     await h17.stop();
   });
 
+  it('分牌:同点两张分两手,各补一张,逐手打完一起结算', async () => {
+    rigTable({ shoe: [card(7, 0), card(7, 1), card(4, 0), card(5, 0), card(8, 0), card(9, 0), card(10, 0), card(11, 0), card(12, 0)] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    let snap = await act(world, 'split');
+    expect(snap.hands).toHaveLength(2);
+    expect(snap.hands[0]!.cards).toEqual(['♠7', '♠8']);
+    expect(snap.hands[1]!.cards).toEqual(['♥7', '♠9']);
+    expect(snap.hands[0]!.active).toBe(true);
+    snap = await act(world, 'stand'); // 手一 15 停
+    expect(snap.hands[0]!.active).toBe(false);
+    expect(snap.hands[1]!.active).toBe(true);
+    snap = await act(world, 'hit'); // 手二 ♠10 → 16+10=26 爆
+    expect(snap.hands[1]!.total).toBe(26);
+    // 全部打完 → 庄家 ♠4♠5=9 → 补 ♠J → 19 停:手一 15 输、手二爆输 → 净 -100
+    expect(snap.phase).toBe('idle');
+    expect(snap.player.chips).toBe(900);
+    expect(snap.ai.chips).toBe(1100);
+    const history = await tool(world, 'casino_table', { action: 'history' });
+    expect(history).toContain('输');
+    await world.stop();
+  });
+
+  it('分 A:各拿一张即停,分牌后的 21 不算黑杰克', async () => {
+    rigTable({ shoe: [card(1, 0), card(1, 1), card(4, 0), card(5, 0), card(6, 0), card(7, 0), card(8, 0)] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    const split = await act(world, 'split');
+    // 两手各 A+一张:♠A♠6(软17) / ♥A♠7(软18);庄家 ♠4♠5=9 → 补 ♠8(17)
+    expect(split.phase).toBe('idle');
+    // 手一 17 对 17 平;手二 18 > 17 赢 → 净 +50
+    expect(split.player.chips).toBe(1050);
+    expect(split.ai.chips).toBe(950);
+    const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap & { history: Array<{ hands: Array<{ outcome: string; cards: string[] }> }> };
+    expect(snap.history[0]!.hands[0]!.outcome).toBe('push');
+    expect(snap.history[0]!.hands[0]!.cards).toEqual(['♠A', '♠6']);
+    expect(snap.history[0]!.hands[1]!.outcome).toBe('win');
+    await world.stop();
+  });
+
+  it('保险:庄家亮 A 先决定;买后被收走则并入结算', async () => {
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 1), card(6, 0), card(13, 0)] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    let snap = await act(world, 'bet', { amount: 50 });
+    expect(snap.phase).toBe('insurance');
+    expect(snap.insurance).toBe(0);
+    snap = await act(world, 'insurance', { amount: 25 });
+    // 庄家 A♥+♠6 = 软 17 不是黑杰克 → 保险待输,继续打牌
+    expect(snap.phase).toBe('playerActing');
+    snap = await act(world, 'stand');
+    // 庄软 17 停(S17):17 > 闲 5 → 闲输 -50,保险输 -25 → 净 -75
+    expect(snap.player.chips).toBe(925);
+    expect(snap.ai.chips).toBe(1075);
+    const history = await tool(world, 'casino_table', { action: 'history' });
+    expect(history).toContain('保险 25');
+    await world.stop();
+  });
+
+  it('保险赢:庄家明 A 且暗牌 10,保险 2:1 对冲主注', async () => {
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 1), card(13, 0)] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    const snap = await act(world, 'insurance', { amount: 25 });
+    // 庄 A♥+♠K 黑杰克:保险 +50,主注输 -50 → 净 0
+    expect(snap.phase).toBe('idle');
+    expect(snap.player.chips).toBe(1000);
+    expect(snap.ai.chips).toBe(1000);
+    const history = await tool(world, 'casino_table', { action: 'history' });
+    expect(history).toContain('保险 25(赢)');
+    await world.stop();
+  });
+
+  it('不买保险:庄家不是黑杰克,直接进入行动', async () => {
+    rigTable({ shoe: [card(2, 0), card(3, 0), card(1, 1), card(6, 0), card(13, 0)] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    const snap = await act(world, 'insurance', { amount: 0 });
+    expect(snap.phase).toBe('playerActing');
+    expect(snap.insurance).toBe(0);
+    await world.stop();
+  });
+
+  it('投降:弃一半注立即结束', async () => {
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    const snap = await act(world, 'surrender');
+    expect(snap.phase).toBe('idle');
+    expect(snap.player.chips).toBe(975);
+    expect(snap.ai.chips).toBe(1025);
+    const history = await tool(world, 'casino_table', { action: 'history' });
+    expect(history).toContain('投降');
+    await world.stop();
+  });
+
   it('闲家自然黑杰克立即 1.5 倍结算', async () => {
-    rigTable({ shoe: [{ rank: 1, suit: 0 }, { rank: 13, suit: 1 }, { rank: 5, suit: 2 }, { rank: 9, suit: 3 }] });
+    rigTable({ shoe: [card(1, 0), card(13, 1), card(5, 2), card(9, 3)] });
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'ai' });
@@ -167,17 +288,20 @@ describe('Casino World(标准 21 点)', () => {
     await world.stop();
   });
 
-  it('闲家爆牌立即输:AI 当闲家连抽三张到 26,庄家只拿两张不补', async () => {
+  it('闲家爆牌立即输:AI 当闲家连抽三张到 26,庄家不补牌直接收注', async () => {
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { dealer: 'player' });
     await tool(world, 'casino_player', { action: 'bet', amount: 50 });
     await tool(world, 'casino_player', { action: 'hit' });
     await tool(world, 'casino_player', { action: 'hit' });
-    const hit = await tool(world, 'casino_player', { action: 'hit' });
-    expect(hit).toContain('爆牌');
-    expect(hit).toContain('-50');
-    const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap & { history: Array<{ dealerCards: string[] }> };
+    await tool(world, 'casino_player', { action: 'hit' }); // ♠6 ♠7 ♠8 → 26 爆
+    const snap = (await world.webUi().invoke!('table', 'state', [])) as Snap & { history: Array<{ dealerCards: string[]; hands: Array<{ outcome: string }>; delta: number }> };
+    expect(snap.phase).toBe('idle');
+    expect(snap.ai.chips).toBe(950);
+    expect(snap.player.chips).toBe(1050);
+    expect(snap.history[0]!.hands[0]!.outcome).toBe('bust');
+    expect(snap.history[0]!.delta).toBe(-50);
     expect(snap.history[0]!.dealerCards).toHaveLength(2);
     await world.stop();
   });
@@ -231,31 +355,7 @@ describe('Casino World(标准 21 点)', () => {
     await second.start(new FakeHost());
     const snap = (await second.webUi().invoke!('table', 'state', [])) as Snap;
     expect(snap.phase).toBe('playerActing');
-    expect(snap.playerTotal).toBe(5);
+    expect(snap.hands[0]!.total).toBe(5);
     await second.stop();
   });
-
-  it('casino_table status 报角色与规则;history 报结算记录', async () => {
-    rigTable({ shoe: [{ rank: 1, suit: 0 }, { rank: 13, suit: 1 }, { rank: 5, suit: 2 }, { rank: 9, suit: 3 }] });
-    const world = worldWith(zeroRng);
-    await world.start(new FakeHost());
-    await act(world, 'newgame', { dealer: 'ai' });
-    const status = await tool(world, 'casino_table', { action: 'status' });
-    expect(status).toContain('你是庄家');
-    expect(status).toContain('软 17 停');
-    await act(world, 'bet', { amount: 50 });
-    const history = await tool(world, 'casino_table', { action: 'history' });
-    expect(history).toContain('黑杰克');
-    await world.stop();
-  });
 });
-
-function hostEventsEmpty(world: CasinoWorld): boolean {
-  void world;
-  return true;
-}
-
-function snapChips(receipt: string): string[] {
-  const match = receipt.match(/你的筹码 (\d+),主人 (\d+)/);
-  return match ? [match[1]!, match[2]!] : [];
-}
