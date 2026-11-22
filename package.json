@@ -2,12 +2,21 @@
   "name": "cortico-world-casino",
   "version": "0.6.1",
   "type": "module",
-  "description": "月下牌桌:一张就在电脑里的标准 21 点牌桌,与你的 AI 同桌对打——选庄、下注、要牌、停牌、分牌、保险,绿呢桌面实时显示双方的牌;筹码是游戏内数字,不涉及真钱。",
+  "description": "月下牌桌:一张就在电脑里的牌桌,和你的 AI 同桌对打——21 点(选庄、下注、要牌、分牌、保险、投降)与抽鬼牌(藏一张、点选抽牌、终局亮牌)两个游戏,绿呢桌面实时显示双方手牌;筹码是游戏内数字,不涉及真钱。",
   "license": "MIT",
+  "homepage": "https://github.com/Flerish/cortico-world-casino#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Flerish/cortico-world-casino.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Flerish/cortico-world-casino/issues"
+  },
   "keywords": [
     "cortico-world",
     "cortico",
     "blackjack",
+    "oldmaid",
     "cards",
     "game",
     "local"
@@ -25,7 +34,7 @@
     "locales": {
       "en": {
         "displayName": "Moonlit Table",
-        "description": "A local blackjack table you share with your AI: pick the dealer, bet, hit and stand; chips are game numbers only."
+        "description": "A card table inside your computer shared with your AI: blackjack (pick the dealer, bet, hit, split, insure, surrender) and Old Maid (one card hidden, click a face-down card to draw, reveal at the end) on one felt table that shows both hands live; chips are game numbers only."
       }
     },
     "tags": [
