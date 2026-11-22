@@ -1,5 +1,6 @@
 /**
- * 牌桌状态与持久化。文件固定名以 World id 开头(casino-table.json),存 ctx.dataDir。
+ * 月下牌桌的状态与持久化(双游戏:21 点 / 抽鬼牌)。
+ * 文件固定名以 World id 开头(casino-table.json),存 ctx.dataDir。
  * 每次落子后原子写(tmp+rename);读不到、读坏或形状对不上(旧版本存档)当作新桌,不抛错。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -7,34 +8,30 @@ import { join } from 'node:path';
 import type { Card } from './cards.ts';
 import { formatCard } from './cards.ts';
 
-/** 庄闲角色;AI 与玩家各执一个,互为对家。庄家是机械的银行,按固定规则自动打。 */
+/** 庄闲角色(21 点);AI 与玩家各执一个,互为对家。庄家是机械的银行,按固定规则自动打。 */
 export type Role = 'dealer' | 'player';
 
-/** 一手进行到哪一步。idle:等选庄/再开;betting:等闲家下注;insurance:庄家亮 A,等闲家决定
- *  保险;playerActing:等闲家动作。闲家结束后庄家由引擎按规则自动打完,直接进入结算。 */
-export type Phase = 'idle' | 'betting' | 'insurance' | 'playerActing';
+/** 21 点进行到哪一步。 */
+export type BlackjackPhase = 'betting' | 'insurance' | 'playerActing';
 
 export type Outcome = 'win' | 'lose' | 'push' | 'blackjack' | 'bust' | 'surrender';
 
-/** 闲家的一手:分牌后会有两手。 */
+/** 21 点的一手:分牌后会有两手。 */
 export interface IdlerHand {
   cards: Card[];
   bet: number;
   doubled: boolean;
-  /** 这手已停(停牌/爆牌/加倍后)。 */
   stood: boolean;
   fromSplit: boolean;
-  /** 结算时写上;进行中为 null。 */
   outcome: Outcome | null;
 }
 
-/** 一名玩家的口袋:筹码、累计战绩、破产次数。 */
+/** 筹码口袋与战绩(21 点用;抽鬼牌不动它)。 */
 export interface SeatState {
   chips: number;
   wins: number;
   losses: number;
   pushes: number;
-  /** 累计盈亏(含保险)。 */
   net: number;
   bankruptcies: number;
 }
@@ -42,46 +39,69 @@ export interface SeatState {
 export interface HandRecord {
   dealer: 'ai' | 'player';
   round: number;
-  /** 本手的底注。 */
   bet: number;
-  /** 闲家的每一手(分牌后多手),outcome 从闲家视角记。 */
   hands: Array<{ cards: string[]; bet: number; outcome: Outcome }>;
   dealerCards: string[];
-  /** 保险注额(0 = 没买)。 */
   insurance: number;
-  /** 保险是否赢(庄家黑杰克)。 */
   insuranceWon: boolean;
-  /** 闲家本手总净变动(含保险)。 */
   delta: number;
   surrendered: boolean;
   at: string;
 }
 
-export interface TableState {
-  /** 每次写盘 +1;面板据此丢弃旧帧。 */
-  version: number;
-  ai: SeatState;
-  player: SeatState;
-  /** AI 的角色(庄/闲);玩家执对家。null = 还没开过局。 */
-  aiRole: Role | null;
-  phase: Phase;
-  /** 手数,从 1 起。 */
+/** 21 点对局状态;null = 桌上没有 21 点对局。 */
+export interface BlackjackState {
+  phase: BlackjackPhase;
+  aiRole: Role;
   round: number;
-  /** 本手的底注(分牌后每手按它起算)。 */
   bet: number;
   insurance: number;
-  /** 'none' = 没到保险;'won' = 庄家黑杰克;'lost' = 庄家没有黑杰克。 */
   insuranceOutcome: 'none' | 'won' | 'lost';
   hands: IdlerHand[];
   activeHand: number;
-  /** 闲家的手,全部明牌;庄家的手第二张是暗牌,闲家打完后才翻开。 */
   dealerCards: Card[];
-  /** 庄家暗牌已翻开。 */
   holeRevealed: boolean;
-  /** 引擎正在替庄家按规则打牌(停顿期间面板与工具都要等它)。 */
   dealerActing: boolean;
   history: HandRecord[];
-  /** 牌靴(未抽完的牌),耗尽时重洗。 */
+}
+
+/** 抽鬼牌对局状态;null = 桌上没有抽鬼牌对局。 */
+export interface OldMaidState {
+  aiHand: Card[];
+  playerHand: Card[];
+  /** 已弃掉的对子(每次弃一对追加一项)。 */
+  discards: Card[][];
+  /** 开局从整副 52 张里藏起的一张;它的同点同伴就是鬼牌。对局中不下发快照,终局才亮。 */
+  hiddenCard: Card | null;
+  /** 轮到谁抽牌。 */
+  turnOwner: 'ai' | 'player';
+  /** 局结束:null = 进行中;非空 = 手空者赢,另一方手里剩同点落单的鬼牌。 */
+  winner: 'ai' | 'player' | null;
+  /** 场次胜场数。 */
+  score: { ai: number; player: number };
+  history: OldMaidRecord[];
+}
+
+export interface OldMaidRecord {
+  at: string;
+  /** 本局抽牌总次数(双方)。 */
+  draws: number;
+  /** 弃掉的对子数。 */
+  discardPairs: number;
+  /** 开局藏起来的那张牌(终局亮牌)。 */
+  hidden: string;
+  winner: 'ai' | 'player';
+}
+
+export interface TableState {
+  /** 每次写盘 +1;面板据此丢弃旧帧。 */
+  version: number;
+  /** 当前对局类型;null = 空桌等选游戏。 */
+  game: 'blackjack' | 'oldmaid' | null;
+  blackjack: BlackjackState | null;
+  oldmaid: OldMaidState | null;
+  ai: SeatState;
+  player: SeatState;
   shoe: Card[];
   drawn: number;
 }
@@ -90,14 +110,11 @@ export function newSeat(startChips: number): SeatState {
   return { chips: startChips, wins: 0, losses: 0, pushes: 0, net: 0, bankruptcies: 0 };
 }
 
-export function newTable(startChips: number): TableState {
+export function newBlackjackState(aiRole: Role): BlackjackState {
   return {
-    version: 0,
-    ai: newSeat(startChips),
-    player: newSeat(startChips),
-    aiRole: null,
-    phase: 'idle',
-    round: 0,
+    phase: 'betting',
+    aiRole,
+    round: 1,
     bet: 0,
     insurance: 0,
     insuranceOutcome: 'none',
@@ -107,32 +124,81 @@ export function newTable(startChips: number): TableState {
     holeRevealed: false,
     dealerActing: false,
     history: [],
+  };
+}
+
+export function newOldMaidState(): OldMaidState {
+  return {
+    aiHand: [],
+    playerHand: [],
+    discards: [],
+    hiddenCard: null,
+    turnOwner: 'player',
+    winner: null,
+    score: { ai: 0, player: 0 },
+    history: [],
+  };
+}
+
+export function newTable(startChips: number): TableState {
+  return {
+    version: 0,
+    game: null,
+    blackjack: null,
+    oldmaid: null,
+    ai: newSeat(startChips),
+    player: newSeat(startChips),
     shoe: [],
     drawn: 0,
   };
 }
 
-const MAX_HISTORY = 50;
+const MAX_HAND_HISTORY = 50;
 
 export function recordHand(state: TableState, record: HandRecord): void {
-  state.history.unshift(record);
-  if (state.history.length > MAX_HISTORY) state.history.length = MAX_HISTORY;
+  state.blackjack!.history.unshift(record);
+  if (state.blackjack!.history.length > MAX_HAND_HISTORY) state.blackjack!.history.length = MAX_HAND_HISTORY;
+}
+
+const MAX_MATCH_HISTORY = 10;
+
+export function recordOldMaid(state: TableState, record: OldMaidRecord): void {
+  state.oldmaid!.history.unshift(record);
+  if (state.oldmaid!.history.length > MAX_MATCH_HISTORY) state.oldmaid!.history.length = MAX_MATCH_HISTORY;
 }
 
 export function formatHand(cards: readonly Card[]): string[] {
   return cards.map((card) => formatCard(card));
 }
 
+/** 0.5.x 的平面存档结构(没有 blackjack / oldmaid 子对象键)。 */
+type LegacyTableState = Omit<TableState, 'blackjack' | 'oldmaid'> & {
+  blackjack?: BlackjackState;
+  oldmaid?: OldMaidState;
+};
+
 /** 读桌面存档;损坏、不存在或形状对不上(旧版本)时返回 null,由调用方决定开新桌。 */
 export function loadTable(dataDir: string): TableState | null {
   const file = join(dataDir, 'casino-table.json');
   if (!existsSync(file)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as TableState;
-    if (typeof parsed?.version !== 'number' || !parsed.ai || !parsed.player || !Array.isArray(parsed.hands)) {
-      return null;
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as LegacyTableState;
+    if (typeof parsed?.version !== 'number' || !parsed.ai || !parsed.player || !('game' in parsed)) return null;
+    // 0.5.x 旧存档没有 blackjack/oldmaid 子对象:保留筹码与战绩,清桌重开(进行中的旧局作废)。
+    // 注意判定 undefined 而非真值——新格式空桌时两个子对象本来就是 null。
+    if (parsed.blackjack === undefined || parsed.oldmaid === undefined) {
+      return {
+        version: parsed.version,
+        game: null,
+        blackjack: null,
+        oldmaid: null,
+        ai: parsed.ai,
+        player: parsed.player,
+        shoe: Array.isArray(parsed.shoe) ? parsed.shoe : [],
+        drawn: typeof parsed.drawn === 'number' ? parsed.drawn : 0,
+      };
     }
-    return parsed;
+    return parsed as TableState;
   } catch {
     return null;
   }

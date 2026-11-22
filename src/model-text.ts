@@ -14,6 +14,28 @@ import { join } from 'node:path';
 export type ModelLanguage = 'zh' | 'en';
 
 const zh = {
+  statusGameBlackjack: '【21 点】',
+  statusGameOldMaid: '【抽鬼牌】',
+  oldMaidTurnYou: (ownerCount: number) => `轮到你抽牌:从{{owner}}手中抽一张(对方现有 ${ownerCount} 张)。`,
+  oldMaidTurnOwner: (aiCount: number) => `轮到{{owner}}抽牌(你现有 ${aiCount} 张)。`,
+  oldMaidTurnNotify: (ownerCount: number) => `轮到你在抽鬼牌里抽牌了:从{{owner}}手中(现有 ${ownerCount} 张,背面朝上)随机抽一张。用 oldmaid_draw。`,
+  oldMaidYourHand: (summary: string, count: number) => `你的手(${count} 张):${summary}`,
+  oldMaidOwnerHand: (count: number) => `{{owner}}的手:${count} 张(背面朝上)。`,
+  oldMaidDiscards: (n: number) => `已弃对子:${n} 对。`,
+  oldMaidScore: (ai: number, owner: number) => `抽鬼牌胜场:你 ${ai} — {{owner}} ${owner}。`,
+  oldMaidDrawReceipt: (card: string, ownSummary: string, ownCount: number, ownerCount: number, newPairs: number) =>
+    `你抽到了 ${card}。你现有 ${ownCount} 张(${ownSummary});{{owner}}剩 ${ownerCount} 张。${newPairs > 0 ? `刚凑成 ${newPairs} 对,已弃掉。` : '未成对。'}`,
+  oldMaidEndLine: (winner: string, aiCount: number, ownerCount: number, aiScore: number, ownerScore: number, hidden: string, ghost: string) =>
+    `抽鬼牌一局结束:${winner}。开局藏起来的牌是 ${hidden}——它同点的落单牌就是鬼牌${ghost ? `,输家手里最后剩的正是 ${ghost}` : ''}。终局牌数——你 ${aiCount} 张,{{owner}} ${ownerCount} 张。胜场:你 ${aiScore} — {{owner}} ${ownerScore}。`,
+  oldMaidBadIndex: (count: number) => `index 要在 0 到 ${count - 1} 之间(对方现有 ${count} 张)。`,
+  returnedToLobby: '已返回大厅,这一手作废(筹码未动)。',
+  oldMaidOver: (winner: string) => `抽鬼牌已结束(${winner})。`,
+  oldMaidOverAlready: '这一局已经结束了。',
+  oldMaidNotYourTurn: '还没轮到你抽牌。',
+  errNewgameKind: '游戏要写 blackjack 或 oldmaid。',
+  errWrongGame: '牌桌上现在进行的不是这个游戏。',
+  oldMaidHistoryTitle: (n: number) => `最近 ${n} 场抽鬼牌:`,
+  oldMaidHistoryLine: (i: number, winner: string) => `${i}. ${winner}。`,
   dealerRole: '庄家',
   playerRole: '闲家',
   // ── 通用 ──
@@ -141,7 +163,29 @@ const zh = {
 export type ModelText = typeof zh;
 
 const en: ModelText = {
-  dealerRole: 'player spot dealer',
+  statusGameBlackjack: '[Blackjack]',
+  statusGameOldMaid: '[Old Maid]',
+  oldMaidTurnYou: (ownerCount) => `Your turn to draw: take one card from {{owner}}'s hand (they hold ${ownerCount}).`,
+  oldMaidTurnOwner: (aiCount) => `It is {{owner}}'s turn to draw (you hold ${aiCount}).`,
+  oldMaidTurnNotify: (ownerCount) => `Your turn to draw in Old Maid: take one random card from {{owner}}'s hand (they hold ${ownerCount}, face down). Use oldmaid_draw.`,
+  oldMaidYourHand: (summary, count) => `Your hand (${count} cards): ${summary}`,
+  oldMaidOwnerHand: (count) => `{{owner}}'s hand: ${count} cards (face down).`,
+  oldMaidDiscards: (n) => `Discarded pairs: ${n}.`,
+  oldMaidScore: (ai, owner) => `Old Maid wins: you ${ai} — {{owner}} ${owner}.`,
+  oldMaidDrawReceipt: (card, ownSummary, ownCount, ownerCount, newPairs) =>
+    `You drew ${card}. You now hold ${ownCount} cards (${ownSummary}); {{owner}} has ${ownerCount} left. ${newPairs > 0 ? `That made ${newPairs} pair${newPairs > 1 ? 's' : ''}, discarded.` : 'No pair formed.'}`,
+  oldMaidEndLine: (winner, aiCount, ownerCount, aiScore, ownerScore, hidden, ghost) =>
+    `Old Maid hand over: ${winner}. The card hidden at the deal was ${hidden} — its rank-mate is the Old Maid${ghost ? `, and the loser is left holding it: ${ghost}` : ''}. Cards at the end — you ${aiCount}, {{owner}} ${ownerCount}. Wins: you ${aiScore} — {{owner}} ${ownerScore}.`,
+  oldMaidBadIndex: (count) => `index must be between 0 and ${count - 1} (they hold ${count} cards).`,
+  returnedToLobby: 'Back to the lobby — the hand is void (chips untouched).',
+  oldMaidOver: (winner) => `The Old Maid hand is over (${winner}).`,
+  oldMaidOverAlready: 'This hand is already over.',
+  oldMaidNotYourTurn: 'It is not your turn to draw.',
+  errNewgameKind: "The game must be blackjack or oldmaid.",
+  errWrongGame: 'The table is not running that game right now.',
+  oldMaidHistoryTitle: (n) => `The last ${n} Old Maid games:`,
+  oldMaidHistoryLine: (i, winner) => `${i}. ${winner}.`,
+  dealerRole: 'dealer',
   playerRole: 'player',
   handInProgress: 'Your hand is still in progress.',
   ownersHandInProgress: "{{owner}}'s hand is still in progress.",

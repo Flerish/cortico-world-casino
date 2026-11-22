@@ -60,7 +60,8 @@ const zh = {
   historyDealerAI: 'AI', historyDealerMe: '我',
   outcomeOf: (o: string) => o,
   rulesTitle: '怎么开局',
-  rulesHtml: `
+  backBtn: '← 返回',
+  rulesBlackjackHtml: `
     <h4>怎么开局</h4>
     <p>点「让 AI 坐庄」或「我坐庄」→ 闲家下注 → 发牌(闲家两张全明,庄家一亮一暗)→ 闲家行动 → 庄家按规则打 → 结算。</p>
     <h4>庄闲怎么分工</h4>
@@ -88,7 +89,47 @@ const zh = {
       <li>筹码低于最小注算破产,可领救济金重新来;筹码是游戏数字,不涉及真钱。</li>
     </ul>
   `,
+  rulesOldmaidHtml: `
+    <h4>怎么开局</h4>
+    <p>点「开局」→ 整副 52 张里先随机藏起一张,谁也不给——它同点的同伴就是「鬼牌」→ 剩下 51 张轮流发完 → 双方先弃掉手里成对的牌 → 你先抽。</p>
+    <h4>怎么抽牌</h4>
+    <ul>
+      <li><b>你的回合:</b>点对方任意一张背面牌抽走它——挑哪张全凭记忆和直觉。</li>
+      <li><b>AI 的回合:</b>它从你手里随机抽一张;抽走了什么你不知道,只会看到手牌少一张。</li>
+      <li>抽到的牌与手里同点即成对,立刻弃入弃牌堆(花色不限,点数相同即成对)。</li>
+    </ul>
+    <h4>胜负与鬼牌</h4>
+    <ul>
+      <li>先把手抽空的人赢;最后剩在输家手里的,必然是那张同点落单的鬼牌。</li>
+      <li>终局亮出开局藏的那张牌,一局的心理战就此揭晓。</li>
+      <li>弃牌堆会展示最近弃掉的对子——据此推理对方手里还留着什么、鬼牌落在谁那边。</li>
+    </ul>
+  `,
   rulesCloseBtn: '知道了,继续',
+  gamePicker: {
+    title: '选一个游戏开局',
+    blackjackTitle: '21 点',
+    blackjackTag: 'BLACKJACK',
+    blackjackDesc: '经典比点:庄家由引擎按死规则打,闲家自由决策——分牌、保险、投降一应俱全。',
+    blackjackAI: '让 AI 坐庄',
+    blackjackMe: '我坐庄',
+    oldmaidTitle: '抽鬼牌',
+    oldmaidTag: 'OLD MAID',
+    oldmaidDesc: '开局整副牌里藏起一张,它的同点同伴就是鬼牌——先抽空手牌的人赢,最后剩着鬼牌的输。',
+    oldmaidStart: '开局',
+  },
+  oldmaid: {
+    yourTurn: '轮到你:点对方一张背面牌,把它抽走',
+    aiTurn: 'AI 正在从你手中抽牌…(它已收到通知)',
+    aiHand: (n: number) => `AI 手牌 ${n} 张`,
+    ownerHand: (n: number) => `对方手牌 ${n} 张`,
+    discards: (n: number) => `已弃对子 ${n}`,
+    score: (a: number, p: number) => `胜场 你 ${a} — 对方 ${p}`,
+    winBanner: '你赢了这一局!',
+    loseBanner: '对方赢了这一局。',
+    hiddenReveal: (h: string) => `开局藏起的牌:${h}(它同点的落单牌就是鬼牌)`,
+    historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · 弃 ${pairs} 对 · 藏 ${hidden}` : `${when} · 弃 ${pairs} 对`,
+  },
 };
 
 export type PanelText = typeof zh;
@@ -148,7 +189,8 @@ const en: PanelText = {
   historyDealerAI: 'AI', historyDealerMe: 'Me',
   outcomeOf: (o) => o,
   rulesTitle: 'How to start',
-  rulesHtml: `
+  backBtn: '← Back',
+  rulesBlackjackHtml: `
     <h4>Starting a hand</h4>
     <p>Tap "Let the AI deal" or "I deal" → the player bets → cards are dealt (both player cards face up; dealer one up, one hidden) → the player acts → the dealer plays by the rule → settlement.</p>
     <h4>Who does what</h4>
@@ -176,7 +218,47 @@ const en: PanelText = {
       <li>Below the minimum bet you are broke and may take relief; chips are game numbers, no real money involved.</li>
     </ul>
   `,
+  rulesOldmaidHtml: `
+    <h4>Starting a game</h4>
+    <p>Tap "Start" → one card is hidden away from the full 52-card deck, dealt to no one — its rank-mate becomes the "Old Maid" → the remaining 51 cards are dealt around → both sides discard their pairs first → you draw first.</p>
+    <h4>Drawing</h4>
+    <ul>
+      <li><b>Your turn:</b> click any face-down card of the opponent to take it — memory and gut feeling are your tools.</li>
+      <li><b>The AI's turn:</b> it takes a random card from your hand; you never learn which one, your hand just shrinks.</li>
+      <li>A drawn card matching a rank you hold forms a pair and is discarded at once (suits don't matter, rank does).</li>
+    </ul>
+    <h4>Winning and the Old Maid</h4>
+    <ul>
+      <li>Whoever empties their hand first wins; the loser is inevitably left holding that lone rank-mate — the Old Maid.</li>
+      <li>When the hand ends the hidden card is revealed and the mind game is settled.</li>
+      <li>The discards pile shows the latest pairs — reason about what the opponent still holds and where the Old Maid sits.</li>
+    </ul>
+  `,
   rulesCloseBtn: 'Got it, continue',
+  gamePicker: {
+    title: 'Pick a game to start',
+    blackjackTitle: 'Blackjack',
+    blackjackTag: 'CLASSIC 21',
+    blackjackDesc: 'The classic comparison: the bank is played by fixed rules while the player decides — split, insurance and surrender all in.',
+    blackjackAI: 'Let the AI deal',
+    blackjackMe: 'I deal',
+    oldmaidTitle: 'Old Maid',
+    oldmaidTag: '抽鬼牌',
+    oldmaidDesc: 'One card is hidden from the full deck at the deal — its rank-mate is the Old Maid. Empty your hand first to win; last one holding it loses.',
+    oldmaidStart: 'Start',
+  },
+  oldmaid: {
+    yourTurn: 'Your turn: click a face-down card to take it',
+    aiTurn: 'The AI is drawing from your hand… (it has been notified)',
+    aiHand: (n: number) => `AI holds ${n} cards`,
+    ownerHand: (n: number) => `The other hand holds ${n} cards`,
+    discards: (n: number) => `${n} pairs discarded`,
+    score: (a: number, p: number) => `Wins: you ${a} — them ${p}`,
+    winBanner: 'You won this game!',
+    loseBanner: 'They won this game.',
+    hiddenReveal: (h: string) => `Hidden at the deal: ${h} (its rank-mate is the Old Maid)`,
+    historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · ${pairs} pairs · hid ${hidden}` : `${when} · ${pairs} pairs`,
+  },
 };
 
 export type PanelTables = { zh: PanelText; en: PanelText };

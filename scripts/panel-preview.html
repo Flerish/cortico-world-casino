@@ -14,7 +14,7 @@
   // 用假宿主跑真实打包产物:验证面板渲染与规则浮层。
   const root = document.getElementById('panel');
   const snapshot = {
-    version: 7, phase: 'idle', round: 3, aiRole: 'dealer', bet: 0, insurance: 0,
+    version: 7, game: 'blackjack', phase: 'idle', round: 3, aiRole: 'dealer', bet: 0, insurance: 0,
     holeRevealed: true, dealerActing: false,
     hands: [{ cards: ['♠K', '♥9'], total: 19, bet: 50, doubled: false, outcome: 'win', active: false, fromSplit: false }],
     activeHand: 0,
@@ -22,6 +22,7 @@
     ai: { chips: 950, wins: 0, losses: 1, pushes: 0, net: -50, bankruptcies: 0, role: 'dealer' },
     player: { chips: 1050, wins: 1, losses: 0, pushes: 0, net: 50, bankruptcies: 0, role: 'player' },
     minBet: 10, maxBet: 200, startChips: 1000, dealerHitsSoft17: false,
+    matches: [],
     lastResult: { dealer: 'ai', round: 3, bet: 50, hands: [{ cards: ['♠K', '♥9'], bet: 50, outcome: 'win' }], dealerCards: ['♦Q', '♣4', '♥6'], insurance: 0, insuranceWon: false, delta: 50, surrendered: false, at: '' },
     history: [{ dealer: 'ai', round: 3, bet: 50, hands: [{ cards: ['♠K', '♥9'], bet: 50, outcome: 'win' }], dealerCards: ['♦Q', '♣4', '♥6'], insurance: 0, insuranceWon: false, delta: 50, surrendered: false, at: '' }],
   };

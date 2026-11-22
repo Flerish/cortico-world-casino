@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>月下牌桌 · 空桌大厅预览(临时)</title>
+<style>
+  body { background: #101418; padding: 24px; font-family: system-ui, sans-serif; }
+  #panel { max-width: 560px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="panel"></div>
+<script type="module">
+  // 用假宿主跑真实打包产物:空桌状态,预览游戏大厅。
+  const root = document.getElementById('panel');
+  const snapshot = {
+    version: 9, game: null, phase: 'idle', blackjack: null, oldmaid: null,
+    ai: { chips: 1000, wins: 2, losses: 1, pushes: 0, net: 30, bankruptcies: 0 },
+    player: { chips: 1030, wins: 1, losses: 2, pushes: 0, net: -30, bankruptcies: 0 },
+    minBet: 10, maxBet: 200, startChips: 1000, dealerHitsSoft17: false,
+    matches: [
+      { at: '2026-11-22T14:12:00+08:00', rounds: 12, aiChips: 1030, playerChips: 970, winner: 'ai', playerNet: -30 },
+      { at: '2026-11-21T22:40:00+08:00', rounds: 8, aiChips: 970, playerChips: 1030, winner: 'player', playerNet: 30 },
+    ],
+  };
+  const ctx = {
+    root,
+    signal: new AbortController().signal,
+    language: 'zh',
+    pageId: 'world:casino',
+    panelId: 'table',
+    async invoke(method) {
+      if (method === 'state') return snapshot;
+      throw new Error('stub');
+    },
+    stream(handlers) {
+      // 不立即推帧:mount 已渲染一次,立即 message 会与初始渲染竞态出双份(仅预览 harness 如此)。
+      window.__push = () => handlers.message(JSON.stringify(snapshot));
+      return { dispose() {} };
+    },
+  };
+  const mod = await import('./webui.js');
+  await mod.default.panels.table.mount(ctx);
+  window.__panelReady = true;
+</script>
+</body>
+</html>

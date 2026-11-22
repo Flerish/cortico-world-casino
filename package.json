@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-casino",
-  "version": "0.5.2",
+  "version": "0.6.1",
   "type": "module",
   "description": "月下牌桌:一张就在电脑里的标准 21 点牌桌,与你的 AI 同桌对打——选庄、下注、要牌、停牌、分牌、保险,绿呢桌面实时显示双方的牌;筹码是游戏内数字,不涉及真钱。",
   "license": "MIT",
@@ -28,7 +28,10 @@
         "description": "A local blackjack table you share with your AI: pick the dealer, bet, hit and stand; chips are game numbers only."
       }
     },
-    "tags": ["game", "experimental"],
+    "tags": [
+      "game",
+      "experimental"
+    ],
     "describe": "describe.json"
   },
   "files": [

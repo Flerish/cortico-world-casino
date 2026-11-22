@@ -11,14 +11,17 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
   // 自描述:可能出现的全部工具与会推出的全部事件,不进提示词。
   describe: {
     tools: describeTools(CASINO_TOOL_DECLS, {
-      casino_table: { zh: '看牌桌状态:谁坐庄、到哪一步、双方的牌与筹码;查历史手。', en: 'Read the table state and hand history.' },
-      casino_player: { zh: '以闲家身份行动:下注开手、要牌、停牌、加倍。庄家由引擎按规则自动打。', en: 'Act as the player: bet, hit, stand, double. The dealer is played by the engine.' },
+      casino_table: { zh: '看牌桌状态:当前游戏、轮到谁、双方的牌与筹码;查两个游戏的历史。', en: 'Read the table state, the running score and both games history.' },
+      casino_player: { zh: '以 21 点闲家身份行动:下注开手、要牌、停牌、加倍、分牌、保险、投降。庄家由引擎按规则自动打。', en: 'Act as the blackjack player: bet, hit, stand, double, split, insurance, surrender. The dealer is played by the engine.' },
       casino_bank: { zh: '查筹码账户;破产时领救济金。', en: 'Read the chip account; take bankruptcy relief when broke.' },
+      oldmaid_draw: { zh: '抽鬼牌里轮到你时,从{{owner}}手中随机抽一张牌。', en: 'Draw one random card from the owner hand on your Old Maid turn.' },
     }),
     events: [
-      { type: 'casino.turn', description: { zh: '轮到 AI 下注或决定保险(它坐闲家时)。', en: 'It is the AI turn to bet or take insurance as the player.' } },
-      { type: 'casino.action', description: { zh: '主人的一个动作:下注、要牌、停牌、加倍、分牌、保险、投降(AI 坐庄时)。', en: 'One of the owner moves while the AI is the dealer.' } },
-      { type: 'casino.result', description: { zh: '一手结算:双方的牌、点数、输赢与筹码变化。', en: 'A hand settled with both sides cards and the chip transfer.' } },
+      { type: 'casino.turn', description: { zh: '轮到 AI 下注或决定保险(它坐 21 点闲家时)。', en: 'It is the AI turn to bet or take insurance as the blackjack player.' } },
+      { type: 'casino.action', description: { zh: '主人的一个动作:下注、要牌、停牌、加倍、分牌、保险、投降(21 点,AI 坐庄时)。', en: 'One of the owner moves in a blackjack hand while the AI is the dealer.' } },
+      { type: 'casino.result', description: { zh: '一手 21 点结算:双方的牌、点数、输赢与筹码变化。', en: 'A blackjack hand settled with both sides cards and the chip transfer.' } },
+      { type: 'oldmaid.turn', description: { zh: '抽鬼牌里轮到 AI 从{{owner}}手中抽牌。', en: 'It is the AI turn to draw a card from the owner hand in Old Maid.' } },
+      { type: 'oldmaid.result', description: { zh: '一局抽鬼牌结束:谁赢了与胜场。', en: 'An Old Maid game ended with the winner and the running score.' } },
     ],
   },
 };

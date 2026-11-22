@@ -15,7 +15,6 @@ interface SeatView {
   pushes: number;
   net: number;
   bankruptcies: number;
-  role: 'dealer' | 'player' | null;
 }
 
 interface HandView {
@@ -25,7 +24,6 @@ interface HandView {
   doubled: boolean;
   outcome: string | null;
   active: boolean;
-  fromSplit: boolean;
 }
 
 interface HandRecordView {
@@ -53,19 +51,7 @@ interface MatchView {
 
 interface Snapshot {
   version: number;
-  phase: 'idle' | 'betting' | 'insurance' | 'playerActing';
-  round: number;
-  aiRole: 'dealer' | 'player' | null;
-  bet: number;
-  insurance: number;
-  holeRevealed: boolean;
-  dealerActing: boolean;
-  hands: HandView[];
-  activeHand: number;
-  dealerCards: string[];
-  dealerVisibleTotal: number | null;
-  dealerTotal: number | null;
-  holeCount: number;
+  game: 'blackjack' | 'oldmaid' | null;
   ai: SeatView;
   player: SeatView;
   minBet: number;
@@ -73,8 +59,34 @@ interface Snapshot {
   startChips: number;
   dealerHitsSoft17: boolean;
   matches: MatchView[];
-  lastResult: HandRecordView | null;
-  history: HandRecordView[];
+  // ── 21 点(game==='blackjack') ──
+  phase?: 'betting' | 'insurance' | 'playerActing';
+  round?: number;
+  aiRole?: 'dealer' | 'player';
+  bet?: number;
+  insurance?: number;
+  holeRevealed?: boolean;
+  dealerActing?: boolean;
+  hands?: HandView[];
+  activeHand?: number;
+  dealerCards?: string[];
+  dealerVisibleTotal?: number | null;
+  dealerTotal?: number | null;
+  holeCount?: number;
+  lastResult?: HandRecordView | null;
+  history?: HandRecordView[];
+  // ── 抽鬼牌(game==='oldmaid' 或刚结束) ──
+  turnOwner?: 'ai' | 'player';
+  winner?: 'ai' | 'player' | null;
+  playerCards?: string[];
+  playerHandCount?: number;
+  aiHandCount?: number;
+  discardPairs?: number;
+  lastDiscards?: string[][];
+  score?: { ai: number; player: number };
+  /** 终局才亮:开局藏起来的那张牌(进行中不下发)。 */
+  hiddenCard?: string | null;
+  oldmaidHistory?: Array<{ at: string; draws: number; discardPairs: number; hidden?: string; winner: string }>;
 }
 
 const SUIT_TONE: Record<string, string> = { '♠': 'idx-black', '♣': 'idx-black', '♥': 'idx-red', '♦': 'idx-red' };
@@ -146,9 +158,9 @@ const ui = { bet: 0, historyOpen: false, rulesOpen: false, matchOpen: false };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
 
-function resultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
+function bjResultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
   const last = state.lastResult;
-  if (!last || state.phase !== 'idle') return null;
+  if (!last || state.phase !== 'betting') return null;
   const playerDelta = last.dealer === 'ai' ? last.delta : -last.delta;
   const banner = el('div', `banner ${last.surrendered ? 'lose' : playerDelta > 0 ? 'win' : playerDelta === 0 ? 'push' : 'lose'}`);
   const mainOutcome = last.hands.length > 1
@@ -159,7 +171,7 @@ function resultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
     .map((h) => `${h.cards.join(' ')}(${T.outcome[h.outcome] ?? h.outcome})`)
     .join(' / ');
   const insText = last.insurance > 0 ? ` · ${T.chips} ${last.insurance}${last.insuranceWon ? ' ✓' : ' ✗'}` : '';
-  const text = el('span', 'banner-text', T.bannerHands(last.round, last.bet, last.insurance, last.insuranceWon, handsText, last.dealerCards.join(' ')));
+  const text = el('span', 'banner-text', `${T.roundLabel(last.round, '', '')} ${T.chips} ${last.bet}${insText} · ${handsText} vs ${last.dealerCards.join(' ')}`);
   const delta = el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`);
   banner.append(pill, text, delta);
   return banner;
@@ -167,7 +179,7 @@ function resultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
 
 function render(ctx: WebUiPanelContext, state: Snapshot): void {
   current = state;
-  if (state.phase !== 'betting') ui.bet = 0;
+  if (state.game !== 'blackjack') ui.bet = 0;
   const T = panelText(ctx.language);
   const root = ctx.root;
   root.replaceChildren();
@@ -176,6 +188,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   style.textContent = `
     .casino-wrap { max-width: 560px; margin: 0 auto; position: relative; }
     .casino-topbar { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+    .topbar-left { display: flex; align-items: center; gap: 8px; }
     .casino-title { font-weight: 700; font-size: 15px; }
     .casino-round { opacity: .7; font-size: 12px; }
     .rules-btn { border: 1px solid rgba(0,0,0,.25); background: #efe9d8; border-radius: 999px;
@@ -204,9 +217,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .hand { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 5px 7px;
       border-radius: 8px; border: 1px solid transparent; }
     .hand.active { border-color: rgba(244,239,226,.65); background: rgba(0,0,0,.18); }
-    .cards { display: flex; gap: 7px; min-height: 80px; align-items: center; }
+    .cards { display: flex; gap: 7px; min-height: 76px; align-items: center; flex-wrap: wrap; justify-content: center; }
     .pcard { width: 52px; height: 73px; border-radius: 6px; position: relative; flex: none; overflow: hidden;
       background: #14120d; box-shadow: 0 2px 5px rgba(0,0,0,.45); }
+    .pcard.pickable { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+    .pcard.pickable:hover { transform: translateY(-6px); box-shadow: 0 6px 12px rgba(0,0,0,.55);
+      outline: 2px solid rgba(244,239,226,.75); }
     .cardimg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
     .idx { position: absolute; top: 3px; left: 5px; line-height: 1; text-align: center;
       text-shadow: 0 1px 0 rgba(255,255,255,.45); }
@@ -216,6 +232,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .idx-black { color: #1d2f55; } .idx-red { color: #a52a35; }
     .pip { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       font-size: 28px; text-shadow: 0 1px 0 rgba(255,255,255,.45); }
+    .pcard.joker { }
     .total-pill { background: rgba(0,0,0,.34); border-radius: 999px; padding: 2px 12px; font-size: 12px; }
     .pot { display: flex; justify-content: center; margin: 10px 0; }
     .pot-inner { background: rgba(0,0,0,.30); border: 1px dashed rgba(244,239,226,.45); border-radius: 12px;
@@ -228,6 +245,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .banner.push { background: #3c3a30; color: #e6dfc8; border: 1px solid #77735f; }
     .banner.wait { background: #27354d; color: #bcd0f0; border: 1px solid #46618f; }
     .banner-text { flex: 1 1 auto; }
+    .hidden-reveal { margin: 6px 0 10px; font-size: 12px; opacity: .85; text-align: center;
+      background: rgba(0,0,0,.30); border-radius: 999px; padding: 4px 14px; display: inline-block; width: 100%;
+      box-sizing: border-box; }
     .outcome-pill { border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; flex: none; }
     .outcome-pill.win, .outcome-pill.blackjack { background: #2c7a4b; color: #fff; }
     .outcome-pill.lose, .outcome-pill.bust { background: #a33848; color: #fff; }
@@ -237,10 +257,37 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .delta.up { color: #9fe6bd; } .delta.down { color: #f0b9c4; }
     .btnrow { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
     .btnrow button { flex: 1 1 100px; padding: 10px 6px; font-size: 14px; border-radius: 9px;
-      border: 1px solid rgba(0,0,0,.25); background: #efe9d8; cursor: pointer; font-weight: 600; }
+      border: 1px solid rgba(0,0,0,.25); background: #efe9d8; cursor: pointer; font-weight: 600;
+      color: #26200e; }
     .btnrow button:disabled { opacity: .45; cursor: default; }
     .btnrow button.primary { background: #c8a44a; color: #26200e; }
     .btnrow button.danger { background: #b34355; color: #fff; }
+    .lobby { padding: 18px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+    .lobby-head { text-align: center; margin-bottom: 2px; }
+    .lobby-suits { font-size: 15px; letter-spacing: 10px; text-indent: 10px; }
+    .lobby-suits .ls-black { color: #eae4d2; }
+    .lobby-suits .ls-red { color: #f0a3a3; }
+    .lobby-title { font-size: 20px; font-weight: 800; letter-spacing: 3px; margin-top: 3px; }
+    .lobby-sub { font-size: 12px; opacity: .7; margin-top: 2px; }
+    .game-card { display: flex; gap: 12px; align-items: center; background: rgba(0,0,0,.30);
+      border: 1px solid rgba(244,239,226,.20); border-radius: 12px; padding: 10px 12px;
+      transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
+    .game-card:hover { border-color: rgba(244,239,226,.55); transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(0,0,0,.4); }
+    .lobby-cards { min-height: 0; gap: 5px; flex: none; width: 109px; justify-content: center; }
+    .game-card .pcard { width: 33px; height: 46px; border-radius: 4px; }
+    .game-card .idx { top: 2px; left: 3px; }
+    .game-card .idx-rank { font-size: 9px; }
+    .game-card .idx-suit { font-size: 7px; }
+    .game-card .pip { font-size: 15px; }
+    .lobby-cards .pcard.tilt { transform: rotate(7deg) translateY(-2px); }
+    .game-info { flex: 1 1 auto; min-width: 0; }
+    .game-name { font-size: 15px; font-weight: 800; letter-spacing: 1px; display: flex;
+      align-items: baseline; gap: 7px; }
+    .game-tag { font-size: 10px; font-weight: 700; letter-spacing: 2px; opacity: .55; }
+    .game-desc { font-size: 12px; opacity: .8; line-height: 1.55; margin: 4px 0 8px; }
+    .game-card .btnrow { margin-top: 0; gap: 6px; }
+    .game-card .btnrow button { padding: 5px 14px; font-size: 12px; flex: none; }
     .betbuild { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
     .betview { font-size: 14px; font-weight: 700; padding: 6px 14px; border-radius: 999px;
       background: rgba(0,0,0,.3); color: #f4efe2; }
@@ -267,308 +314,462 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
 
   // ── 顶栏 ──
   const topbar = el('div', 'casino-topbar');
-  topbar.append(el('span', 'casino-title', T.title));
-  const roleText = state.aiRole === null ? T.roleText.noGame : state.aiRole === 'dealer' ? T.roleText.aiDealer : T.roleText.meDealer;
+  const topbarLeft = el('div', 'topbar-left');
+  // 对局进行中:左上角放返回键,弃掉当前局回大厅(未结算的手不涉及筹码变动)。
+  if (state.game !== null) {
+    const backBtn = el('button', 'rules-btn', T.backBtn);
+    backBtn.type = 'button';
+    backBtn.addEventListener('click', () => void send(ctx, T, 'leave'), { signal: ctx.signal });
+    topbarLeft.append(backBtn);
+  }
+  topbarLeft.append(el('span', 'casino-title', T.title));
+  topbar.append(topbarLeft);
   const softLabel = state.dealerHitsSoft17 ? T.soft17Hit : T.soft17Stand;
-  topbar.append(el('span', 'casino-round', state.round > 0 ? T.roundLabel(state.round, roleText, softLabel) : `${roleText} · ${softLabel}`));
+  const gameLabel = state.game === 'blackjack' ? (state.aiRole === 'dealer' ? T.roleText.aiDealer : T.roleText.meDealer) : state.game === 'oldmaid' ? T.gamePicker.oldmaidTitle : T.roleText.noGame;
+  topbar.append(el('span', 'casino-round', `${gameLabel} · ${softLabel}`));
   const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? T.rulesClose : T.rulesBtn);
   rulesBtn.type = 'button';
   rulesBtn.addEventListener('click', () => {
     ui.rulesOpen = !ui.rulesOpen;
     if (current) render(ctx, current);
   }, { signal: ctx.signal });
-  const resetBtn = el('button', 'rules-btn', T.resetBtn);
-  resetBtn.type = 'button';
-  resetBtn.addEventListener('click', () => void send(ctx, T, 'resetmatch'), { signal: ctx.signal });
-  topbar.append(rulesBtn, resetBtn);
+  topbar.append(rulesBtn);
   wrap.append(topbar);
 
-  // ── 绿呢桌面 ──
-  const felt = el('div', 'felt');
-  wrap.append(felt);
+  // ── 空桌:游戏大厅 ──
+  if (state.game === null) {
+    const felt = el('div', 'felt lobby');
+    wrap.append(felt);
 
-  const dealerIsAi = state.aiRole !== 'player';
-  const dealerSeatView = state.aiRole === 'player' ? state.player : state.ai;
-  const playerSeatView = state.aiRole === 'player' ? state.ai : state.player;
-  const dealerRole = state.aiRole === null ? null : 'dealer';
-  const playerRole = state.aiRole === null ? null : state.aiRole === 'dealer' ? 'player' : 'dealer';
-
-  // 庄家席(上)
-  const dealerSeat = el('div', 'seat');
-  const dealerHead = el('div', 'seat-head');
-  dealerHead.append(el('span', undefined, dealerIsAi ? T.ai : T.me));
-  if (dealerRole) dealerHead.append(el('span', 'seat-role', T.roleDealer));
-  dealerSeat.append(dealerHead);
-  const dealerCards = el('div', 'cards');
-  if (state.phase !== 'idle' && state.dealerCards.length === 0) dealerCards.append(cardEl('', true));
-  for (const text of state.dealerCards) dealerCards.append(cardEl(text));
-  for (let i = 0; i < state.holeCount; i++) dealerCards.append(cardEl('', true));
-  if (state.phase === 'idle' && state.round === 0) dealerCards.append(el('span', 'seatstats', T.dealerAutoHint));
-  dealerSeat.append(dealerCards);
-  if (state.holeRevealed && state.dealerTotal !== null) {
-    dealerSeat.append(el('div', 'total-pill', T.dealerTotal(state.dealerTotal)));
-  } else if (state.dealerVisibleTotal !== null) {
-    dealerSeat.append(el('div', 'total-pill', T.dealerUpTotal(state.dealerVisibleTotal) + (state.holeCount > 0 ? T.withHole : '')));
-  }
-  const dealerFoot = el('div', 'seat-head');
-  dealerFoot.append(chipsEl(T.bank, dealerSeatView.chips, dealerIsAi ? 'blue' : 'gold'));
-  dealerFoot.append(el('span', 'seatstats', statsLine(T, dealerSeatView)));
-  dealerSeat.append(dealerFoot);
-  felt.append(dealerSeat);
-
-  // 中间:押注
-  const pot = el('div', 'pot');
-  const potInner = el('div', 'pot-inner');
-  if (state.phase === 'idle') {
-    potInner.append(el('div', undefined, state.round > 0 ? T.potIdle : T.potPickDealer));
-    potInner.append(el('div', 'pot-num', T.potMinEach(state.minBet)));
-  } else {
-    potInner.append(el('div', undefined, T.potBet + (state.insurance > 0 ? T.potWithInsurance(state.insurance) : '')));
-    potInner.append(el('div', 'pot-num', String(state.bet)));
-  }
-  pot.append(potInner);
-  felt.append(pot);
-
-  // 闲家席(下):分牌后多手并排
-  const playerSeat = el('div', 'seat');
-  const playerHead = el('div', 'seat-head');
-  playerHead.append(el('span', undefined, dealerIsAi ? T.me : T.ai));
-  if (playerRole) playerHead.append(el('span', 'seat-role', T.rolePlayer));
-  playerSeat.append(playerHead);
-  const handsWrap = el('div', 'hands');
-  if (state.phase !== 'idle' && state.hands.length === 0) {
-    const single = el('div', 'hand');
-    const cards = el('div', 'cards');
-    cards.append(cardEl('', true));
-    single.append(cards);
-    handsWrap.append(single);
-  }
-  if (state.phase === 'idle' && state.round === 0) {
-    const single = el('div', 'hand');
-    single.append(el('span', 'seatstats', T.idleHint));
-    handsWrap.append(single);
-  }
-  for (const hand of state.hands) {
-    const box = el('div', `hand${hand.active ? ' active' : ''}`);
-    const cards = el('div', 'cards');
-    for (const text of hand.cards) cards.append(cardEl(text));
-    box.append(cards);
-    box.append(el('div', 'total-pill', `${hand.total ?? ''} · ${T.chips} ${hand.bet}${hand.doubled ? ' ×2' : ''}`));
-    if (hand.outcome) box.append(outcomePill(T, hand.outcome));
-    handsWrap.append(box);
-  }
-  playerSeat.append(handsWrap);
-  const playerFoot = el('div', 'seat-head');
-  playerFoot.append(chipsEl(T.chips, playerSeatView.chips, dealerIsAi ? 'gold' : 'blue'));
-  playerFoot.append(el('span', 'seatstats', statsLine(T, playerSeatView)));
-  playerSeat.append(playerFoot);
-  felt.append(playerSeat);
-
-  // ── 结果横幅(结算后)──
-  const bannerBox = el('div');
-  wrap.append(bannerBox);
-  const banner = resultBanner(T, state);
-  if (banner) bannerBox.append(banner);
-
-  // ── 等待 AI 的横幅 ──
-  const waitingAi =
-    (state.phase === 'betting' || state.phase === 'insurance') && state.aiRole === 'player';
-  if (waitingAi) {
-    const wait = el('div', 'banner wait');
-    wait.append(el('span', 'banner-text', state.phase === 'betting' ? T.waitingBet : T.waitingInsurance));
-    const nudge = el('button', undefined, T.nudge);
-    nudge.type = 'button';
-    nudge.addEventListener('click', () => void send(ctx, T, 'nudge'), { signal: ctx.signal });
-    wait.append(nudge);
-    bannerBox.append(wait);
-  }
-
-  const playerIsIdler = state.aiRole === 'dealer';
-  const playerBroke = state.player.chips < state.minBet && state.phase === 'idle';
-
-  // ── 按阶段给操作 ──
-  if (state.phase === 'idle') {
-    const row = el('div', 'btnrow');
-    const aiDealer = el('button', 'primary', T.idleBtnAI);
-    aiDealer.type = 'button';
-    aiDealer.addEventListener('click', () => void send(ctx, T, 'newgame', { dealer: 'ai' }), { signal: ctx.signal });
-    const meDealer = el('button', undefined, T.idleBtnMe);
-    meDealer.type = 'button';
-    meDealer.addEventListener('click', () => void send(ctx, T, 'newgame', { dealer: 'player' }), { signal: ctx.signal });
-    row.append(aiDealer, meDealer);
-    wrap.append(row);
-    if (playerBroke) {
-      const relief = el('div', 'broke');
-      relief.append(el('span', undefined, T.broke(state.player.chips, state.minBet)));
-      const btn = el('button', 'danger', T.reliefBtn(state.startChips));
-      btn.type = 'button';
-      btn.addEventListener('click', () => void send(ctx, T, 'relief'), { signal: ctx.signal });
-      relief.append(btn);
-      wrap.append(relief);
+    const head = el('div', 'lobby-head');
+    const suits = el('div', 'lobby-suits');
+    for (const [i, s] of (['♠', '♥', '♦', '♣'] as const).entries()) {
+      suits.append(el('span', i % 2 === 0 ? 'ls-black' : 'ls-red', s));
     }
-  } else if (state.phase === 'betting' && playerIsIdler) {
-    const cap = Math.min(state.maxBet, state.player.chips, state.ai.chips);
-    ui.bet = Math.min(ui.bet, cap);
-    const build = el('div', 'betbuild');
-    const view = el('span', 'betview', T.betView(ui.bet));
-    const clear = el('button', undefined, T.clear);
-    clear.type = 'button';
-    const go = el('button', 'primary', T.goBet(cap));
-    go.type = 'button';
-    // 按钮/筹码的可点状态跟着注额走:加注即亮,不依赖下一次重渲染。
-    const sync = (): void => {
-      view.textContent = T.betView(ui.bet);
-      clear.disabled = ui.bet === 0;
-      go.disabled = ui.bet < state.minBet;
-    };
-    const add = (n: number): void => {
-      ui.bet = Math.min(cap, ui.bet + n);
-      sync();
-    };
-    for (const [label, n, tone] of [[T.chip10, 10, 'red'], [T.chip50, 50, 'green'], [T.chip100, 100, 'black']] as const) {
-      const chip = el('div', `chip chip-${tone}`, label);
-      chip.addEventListener('click', () => add(n), { signal: ctx.signal });
-      build.append(chip);
-    }
-    const allin = el('div', 'chip chip-gold', T.allin);
-    allin.addEventListener('click', () => {
-      ui.bet = cap;
-      sync();
-    }, { signal: ctx.signal });
-    build.append(allin, view);
-    wrap.append(build);
-    const row = el('div', 'btnrow');
-    clear.addEventListener('click', () => {
-      ui.bet = 0;
-      sync();
-    }, { signal: ctx.signal });
-    go.addEventListener('click', () => void send(ctx, T, 'bet', { amount: ui.bet }), { signal: ctx.signal });
-    row.append(clear, go);
-    wrap.append(row);
-  } else if (state.phase === 'betting') {
-    const banner2 = el('div', 'banner wait');
-    banner2.append(el('span', 'banner-text', T.waitingBet));
-    wrap.append(banner2);
-  } else if (state.phase === 'insurance' && playerIsIdler) {
-    const maxIns = Math.floor(state.bet / 2);
-    const banner2 = el('div', 'banner wait');
-    banner2.append(el('span', 'banner-text', T.insuranceAsk(maxIns)));
-    wrap.append(banner2);
-    const row = el('div', 'btnrow');
-    const decline = el('button', undefined, T.insuranceDecline);
-    decline.type = 'button';
-    decline.addEventListener('click', () => void send(ctx, T, 'insurance', { amount: 0 }), { signal: ctx.signal });
-    const buy = el('button', 'primary', T.insuranceBuy(maxIns));
-    buy.type = 'button';
-    buy.disabled = maxIns <= 0;
-    buy.addEventListener('click', () => void send(ctx, T, 'insurance', { amount: maxIns }), { signal: ctx.signal });
-    row.append(decline, buy);
-    wrap.append(row);
-  } else if (state.phase === 'insurance') {
-    const banner2 = el('div', 'banner wait');
-    banner2.append(el('span', 'banner-text', T.waitingInsurance));
-    wrap.append(banner2);
-  } else if (state.phase === 'playerActing' && playerIsIdler && !state.dealerActing) {
-    const active = state.hands[state.activeHand];
-    const singleFresh = state.hands.length === 1 && (active?.cards.length ?? 0) === 2;
-    const canSplit = singleFresh
-      && active!.cards.length === 2
-      && active!.cards[0]!.slice(1) === active!.cards[1]!.slice(1);
-    const row = el('div', 'btnrow');
-    const hit = el('button', 'primary', T.hit);
-    hit.type = 'button';
-    const stand = el('button', undefined, T.stand);
-    stand.type = 'button';
-    const dbl = el('button', undefined, T.double);
-    dbl.type = 'button';
-    dbl.disabled = (active?.cards.length ?? 0) !== 2;
-    const split = el('button', undefined, T.splitBtn);
-    split.type = 'button';
-    split.disabled = !canSplit;
-    const surrender = el('button', 'danger', T.surrenderBtn);
-    surrender.type = 'button';
-    surrender.disabled = !singleFresh;
-    hit.addEventListener('click', () => void send(ctx, T, 'hit'), { signal: ctx.signal });
-    stand.addEventListener('click', () => void send(ctx, T, 'stand'), { signal: ctx.signal });
-    dbl.addEventListener('click', () => void send(ctx, T, 'double'), { signal: ctx.signal });
-    split.addEventListener('click', () => void send(ctx, T, 'split'), { signal: ctx.signal });
-    surrender.addEventListener('click', () => void send(ctx, T, 'surrender'), { signal: ctx.signal });
-    row.append(hit, stand, dbl, split, surrender);
-    wrap.append(row);
-  } else if (state.phase === 'playerActing' && state.dealerActing) {
-    const banner2 = el('div', 'banner wait');
-    banner2.append(el('span', 'banner-text', dealerIsAi ? T.dealerPlayingAI : T.dealerPlayingMe));
-    wrap.append(banner2);
-  } else if (state.phase === 'playerActing') {
-    const banner2 = el('div', 'banner wait');
-    banner2.append(el('span', 'banner-text', T.waitingPlay));
-    wrap.append(banner2);
+    head.append(suits, el('div', 'lobby-title', T.title), el('div', 'lobby-sub', T.gamePicker.title));
+    felt.append(head);
+
+    // 21 点卡:♠A + ♥K 明牌装饰(blackjack 本义就是黑桃 A + J)
+    const bjCard = el('div', 'game-card');
+    const bjRow = el('div', 'cards lobby-cards');
+    bjRow.append(cardEl('♠A'), cardEl('♥K'));
+    bjCard.append(bjRow);
+    const bjInfo = el('div', 'game-info');
+    const bjName = el('div', 'game-name');
+    bjName.append(el('span', undefined, T.gamePicker.blackjackTitle), el('span', 'game-tag', T.gamePicker.blackjackTag));
+    bjInfo.append(bjName, el('div', 'game-desc', T.gamePicker.blackjackDesc));
+    const bjBtns = el('div', 'btnrow');
+    const bjAI = el('button', 'primary', T.gamePicker.blackjackAI);
+    bjAI.type = 'button';
+    bjAI.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'blackjack', dealer: 'ai' }), { signal: ctx.signal });
+    const bjMe = el('button', undefined, T.gamePicker.blackjackMe);
+    bjMe.type = 'button';
+    bjMe.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'blackjack', dealer: 'player' }), { signal: ctx.signal });
+    bjBtns.append(bjAI, bjMe);
+    bjInfo.append(bjBtns);
+    bjCard.append(bjInfo);
+    felt.append(bjCard);
+
+    // 抽鬼牌卡:三张背面牌,最后一张微斜——藏着鬼牌的悬念
+    const omCard = el('div', 'game-card');
+    const omRow = el('div', 'cards lobby-cards');
+    const omBack1 = cardEl('', true);
+    const omBack2 = cardEl('', true);
+    const omBack3 = cardEl('', true);
+    omBack3.classList.add('tilt');
+    omRow.append(omBack1, omBack2, omBack3);
+    omCard.append(omRow);
+    const omInfo = el('div', 'game-info');
+    const omName = el('div', 'game-name');
+    omName.append(el('span', undefined, T.gamePicker.oldmaidTitle), el('span', 'game-tag', T.gamePicker.oldmaidTag));
+    omInfo.append(omName, el('div', 'game-desc', T.gamePicker.oldmaidDesc));
+    const omBtns = el('div', 'btnrow');
+    const omBtn = el('button', 'primary', T.gamePicker.oldmaidStart);
+    omBtn.type = 'button';
+    omBtn.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'oldmaid' }), { signal: ctx.signal });
+    omBtns.append(omBtn);
+    omInfo.append(omBtns);
+    omCard.append(omInfo);
+    felt.append(omCard);
   }
 
-  // ── 手历史 ──
-  const history = el('div', 'history');
-  const toggle = el('button', 'history-toggle', T.historyToggle(ui.historyOpen, state.history.length));
-  toggle.type = 'button';
-  toggle.addEventListener('click', () => {
-    ui.historyOpen = !ui.historyOpen;
-    toggle.textContent = T.historyToggle(ui.historyOpen, state.history.length);
+  // ── 21 点桌面 ──
+  if (state.game === 'blackjack') {
+    const felt = el('div', 'felt');
+    wrap.append(felt);
+    const bj = {
+      phase: state.phase ?? 'betting',
+      round: state.round ?? 0,
+      aiRole: state.aiRole ?? 'dealer',
+      bet: state.bet ?? 0,
+      insurance: state.insurance ?? 0,
+      holeRevealed: state.holeRevealed ?? false,
+      dealerActing: state.dealerActing ?? false,
+      hands: state.hands ?? [],
+      activeHand: state.activeHand ?? 0,
+      dealerCards: state.dealerCards ?? [],
+      dealerVisibleTotal: state.dealerVisibleTotal ?? null,
+      dealerTotal: state.dealerTotal ?? null,
+      holeCount: state.holeCount ?? 0,
+      minBet: state.minBet,
+      maxBet: state.maxBet,
+      playerChips: state.player.chips,
+      aiChips: state.ai.chips,
+    };
+    const dealerIsAi = bj.aiRole !== 'player';
+    const dealerSeatView = bj.aiRole === 'player' ? state.player : state.ai;
+    const playerSeatView = bj.aiRole === 'player' ? state.ai : state.player;
+
+    const dealerSeat = el('div', 'seat');
+    const dealerHead = el('div', 'seat-head');
+    dealerHead.append(el('span', undefined, dealerIsAi ? T.ai : T.me));
+    dealerHead.append(el('span', 'seat-role', T.roleDealer));
+    dealerSeat.append(dealerHead);
+    const dealerCards = el('div', 'cards');
+    if (bj.phase !== 'betting' || bj.dealerCards.length === 0) {
+      if (bj.dealerCards.length === 0) dealerCards.append(cardEl('', true));
+    }
+    for (const text of bj.dealerCards) dealerCards.append(cardEl(text));
+    for (let i = 0; i < bj.holeCount; i++) dealerCards.append(cardEl('', true));
+    dealerSeat.append(dealerCards);
+    if (bj.holeRevealed && bj.dealerTotal !== null) {
+      dealerSeat.append(el('div', 'total-pill', `${T.roleDealer} ${bj.dealerTotal}`));
+    } else if (bj.dealerVisibleTotal !== null) {
+      dealerSeat.append(el('div', 'total-pill', `${T.dealerUpTotal(bj.dealerVisibleTotal)}${bj.holeCount > 0 ? T.withHole : ''}`));
+    }
+    const dealerFoot = el('div', 'seat-head');
+    dealerFoot.append(chipsEl(T.bank, dealerSeatView.chips, dealerIsAi ? 'blue' : 'gold'));
+    dealerFoot.append(el('span', 'seatstats', statsLine(T, dealerSeatView)));
+    dealerSeat.append(dealerFoot);
+    felt.append(dealerSeat);
+
+    const pot = el('div', 'pot');
+    const potInner = el('div', 'pot-inner');
+    potInner.append(el('div', undefined, T.potBet + (bj.insurance > 0 ? T.potWithInsurance(bj.insurance) : '')));
+    potInner.append(el('div', 'pot-num', String(bj.bet)));
+    pot.append(potInner);
+    felt.append(pot);
+
+    const playerSeat = el('div', 'seat');
+    const playerHead = el('div', 'seat-head');
+    playerHead.append(el('span', undefined, dealerIsAi ? T.me : T.ai));
+    playerHead.append(el('span', 'seat-role', T.rolePlayer));
+    playerSeat.append(playerHead);
+    const playerCards = el('div', 'cards');
+    if (bj.hands.length === 0) playerCards.append(cardEl('', true));
+    for (const hand of bj.hands) {
+      for (const text of hand.cards) playerCards.append(cardEl(text));
+    }
+    playerSeat.append(playerCards);
+    const totals = bj.hands.map((hand) => hand.total).filter((n) => n !== null);
+    if (totals.length) {
+      playerSeat.append(el('div', 'total-pill', `${T.rolePlayer} ${totals.join(' / ')} 点`));
+    }
+    const playerFoot = el('div', 'seat-head');
+    playerFoot.append(chipsEl(T.chips, playerSeatView.chips, dealerIsAi ? 'gold' : 'blue'));
+    playerFoot.append(el('span', 'seatstats', statsLine(T, playerSeatView)));
+    playerSeat.append(playerFoot);
+    felt.append(playerSeat);
+
+    const bannerBox = el('div');
+    wrap.append(bannerBox);
+    const banner = bjResultBanner(T, state);
+    if (banner) bannerBox.append(banner);
+
+    const waitingAi =
+      (bj.phase === 'betting' || bj.phase === 'insurance') && bj.aiRole === 'player';
+    if (waitingAi) {
+      const wait = el('div', 'banner wait');
+      wait.append(el('span', 'banner-text', bj.phase === 'betting' ? T.waitingBet : T.waitingInsurance));
+      const nudge = el('button', undefined, T.nudge);
+      nudge.type = 'button';
+      nudge.addEventListener('click', () => void send(ctx, T, 'nudge'), { signal: ctx.signal });
+      wait.append(nudge);
+      bannerBox.append(wait);
+    }
+
+    const playerIsIdler = bj.aiRole === 'dealer';
+    if (bj.phase === 'betting' && playerIsIdler) {
+      const cap = Math.min(bj.maxBet, state.player.chips, state.ai.chips);
+      ui.bet = Math.min(ui.bet, cap);
+      const build = el('div', 'betbuild');
+      const view = el('span', 'betview', T.betView(ui.bet));
+      const clear = el('button', undefined, T.clear);
+      clear.type = 'button';
+      const go = el('button', 'primary', T.goBet(cap));
+      go.type = 'button';
+      const sync = (): void => {
+        view.textContent = T.betView(ui.bet);
+        clear.disabled = ui.bet === 0;
+        go.disabled = ui.bet < bj.minBet;
+      };
+      const add = (n: number): void => {
+        ui.bet = Math.min(cap, ui.bet + n);
+        sync();
+      };
+      for (const [label, n, tone] of [[T.chip10, 10, 'red'], [T.chip50, 50, 'green'], [T.chip100, 100, 'black']] as const) {
+        const chip = el('div', `chip chip-${tone}`, label);
+        chip.addEventListener('click', () => add(n), { signal: ctx.signal });
+        build.append(chip);
+      }
+      const allin = el('div', 'chip chip-gold', T.allin);
+      allin.addEventListener('click', () => {
+        ui.bet = cap;
+        sync();
+      }, { signal: ctx.signal });
+      build.append(allin, view);
+      wrap.append(build);
+      const row = el('div', 'btnrow');
+      clear.addEventListener('click', () => {
+        ui.bet = 0;
+        sync();
+      }, { signal: ctx.signal });
+      go.addEventListener('click', () => void send(ctx, T, 'bet', { amount: ui.bet }), { signal: ctx.signal });
+      row.append(clear, go);
+      wrap.append(row);
+    } else if (bj.phase === 'betting') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.waitingBet));
+      wrap.append(banner2);
+    } else if (bj.phase === 'insurance' && playerIsIdler) {
+      const maxIns = Math.floor(bj.bet / 2);
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.insuranceAsk(maxIns)));
+      wrap.append(banner2);
+      const row = el('div', 'btnrow');
+      const decline = el('button', undefined, T.insuranceDecline);
+      decline.type = 'button';
+      decline.addEventListener('click', () => void send(ctx, T, 'insurance', { amount: 0 }), { signal: ctx.signal });
+      const buy = el('button', 'primary', T.insuranceBuy(maxIns));
+      buy.type = 'button';
+      buy.disabled = maxIns <= 0;
+      buy.addEventListener('click', () => void send(ctx, T, 'insurance', { amount: maxIns }), { signal: ctx.signal });
+      row.append(decline, buy);
+      wrap.append(row);
+    } else if (bj.phase === 'insurance') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.waitingInsurance));
+      wrap.append(banner2);
+    } else if (bj.phase === 'playerActing' && playerIsIdler && !bj.dealerActing) {
+      const active = bj.hands[bj.activeHand];
+      const singleFresh = bj.hands.length === 1 && (active?.cards.length ?? 0) === 2;
+      const canSplit = singleFresh
+        && active!.cards.length === 2
+        && active!.cards[0]!.slice(1) === active!.cards[1]!.slice(1);
+      const row = el('div', 'btnrow');
+      const hit = el('button', 'primary', T.hit);
+      hit.type = 'button';
+      const stand = el('button', undefined, T.stand);
+      stand.type = 'button';
+      const dbl = el('button', undefined, T.double);
+      dbl.type = 'button';
+      dbl.disabled = (active?.cards.length ?? 0) !== 2;
+      const split = el('button', undefined, T.splitBtn);
+      split.type = 'button';
+      split.disabled = !canSplit;
+      const surrender = el('button', 'danger', T.surrenderBtn);
+      surrender.type = 'button';
+      surrender.disabled = !singleFresh;
+      hit.addEventListener('click', () => void send(ctx, T, 'hit'), { signal: ctx.signal });
+      stand.addEventListener('click', () => void send(ctx, T, 'stand'), { signal: ctx.signal });
+      dbl.addEventListener('click', () => void send(ctx, T, 'double'), { signal: ctx.signal });
+      split.addEventListener('click', () => void send(ctx, T, 'split'), { signal: ctx.signal });
+      surrender.addEventListener('click', () => void send(ctx, T, 'surrender'), { signal: ctx.signal });
+      row.append(hit, stand, dbl, split, surrender);
+      wrap.append(row);
+    } else if (bj.phase === 'playerActing' && bj.dealerActing) {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', dealerIsAi ? T.dealerPlayingAI : T.dealerPlayingMe));
+      wrap.append(banner2);
+    } else if (bj.phase === 'playerActing') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.waitingPlay));
+      wrap.append(banner2);
+    }
+  }
+
+  // ── 抽鬼牌桌面 ──
+  if (state.game === 'oldmaid' || (state.game === null && state.winner !== undefined && state.playerCards)) {
+    const omEnded = state.game === null;
+    const omTurnOwner = state.turnOwner ?? 'player';
+    const omWinner = state.winner;
+    const omPlayerCards = state.playerCards ?? [];
+    const omPlayerHandCount = state.playerHandCount ?? 0;
+    const omAiHandCount = state.aiHandCount ?? 0;
+    const omDiscardPairs = state.discardPairs ?? 0;
+    const omLastDiscards = state.lastDiscards ?? [];
+    const omScore = state.score ?? { ai: 0, player: 0 };
+    const omOldmaidHistory = state.oldmaidHistory ?? [];
+    const winner = omWinner;
+    const playerIsIdler = omTurnOwner !== 'player';
+
+    const felt = el('div', 'felt');
+    wrap.append(felt);
+
+    // 对方席(上,背面)
+    const aiSeat = el('div', 'seat');
+    const aiHead = el('div', 'seat-head');
+    aiHead.append(el('span', undefined, T.ai));
+    aiHead.append(el('span', 'seat-role', T.rolePlayer));
+    aiSeat.append(aiHead);
+    const aiCards = el('div', 'cards');
+    const canPick = !omEnded && omTurnOwner === 'player';
+    for (let i = 0; i < omAiHandCount; i++) {
+      const back = cardEl('', true);
+      if (canPick) {
+        back.classList.add('pickable');
+        const idx = i;
+        back.addEventListener('click', () => void send(ctx, T, 'draw', { index: idx }), { signal: ctx.signal });
+      }
+      aiCards.append(back);
+    }
+    if (!omEnded && omAiHandCount === 0) aiCards.append(cardEl('', true));
+    aiSeat.append(aiCards);
+    aiSeat.append(el('div', 'total-pill', T.oldmaid.aiHand(omAiHandCount)));
+    felt.append(aiSeat);
+
+    // 中间:弃对堆
+    const pot = el('div', 'pot');
+    const potInner = el('div', 'pot-inner');
+    potInner.append(el('div', undefined, T.oldmaid.discards(omDiscardPairs)));
+    potInner.append(el('div', 'pot-num', String(omDiscardPairs)));
+    const last3 = omLastDiscards ?? [];
+    for (const pair of last3) {
+      potInner.append(el('div', undefined, pair.join(' ')));
+    }
+    pot.append(potInner);
+    felt.append(pot);
+
+    // 你的席(下,明牌)
+    const playerSeat = el('div', 'seat');
+    const playerHead = el('div', 'seat-head');
+    playerHead.append(el('span', undefined, T.me));
+    playerSeat.append(playerHead);
+    const playerCards = el('div', 'cards');
+    for (const text of omPlayerCards) playerCards.append(cardEl(text));
+    playerSeat.append(playerCards);
+    playerSeat.append(el('div', 'total-pill', `${T.oldmaid.ownerHand(omPlayerHandCount)} · ${T.oldmaid.score(omScore.ai, omScore.player)}`));
+    felt.append(playerSeat);
+
+    // ── 抽鬼牌结束横幅 ──
+    const bannerBox = el('div');
+    wrap.append(bannerBox);
+    if (omEnded && winner) {
+      const playerWon = winner === 'player';
+      const banner = el('div', `banner ${playerWon ? 'win' : 'lose'}`);
+      banner.append(el('span', 'banner-text', playerWon ? T.oldmaid.winBanner : T.oldmaid.loseBanner));
+      bannerBox.append(banner);
+      if (state.hiddenCard) bannerBox.append(el('div', 'hidden-reveal', T.oldmaid.hiddenReveal(state.hiddenCard)));
+    }
+
+    // ── 回合操作:玩家回合点对方背面牌,无需按钮 ──
+    if (!omEnded && omTurnOwner === 'player') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.oldmaid.yourTurn));
+      wrap.append(banner2);
+    } else if (!omEnded && omTurnOwner === 'ai') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.oldmaid.aiTurn));
+      wrap.append(banner2);
+    }
+
+    // ── 局历史 ──
+    const omHistory = el('div', 'history');
+    const omToggle = el('button', 'history-toggle', T.matchToggle(ui.matchOpen, omOldmaidHistory.length));
+    omToggle.type = 'button';
+    omToggle.addEventListener('click', () => {
+      ui.matchOpen = !ui.matchOpen;
+      omToggle.textContent = T.matchToggle(ui.matchOpen, omOldmaidHistory.length);
+      omList.classList.toggle('hidden', !ui.matchOpen);
+    }, { signal: ctx.signal });
+    omHistory.append(omToggle);
+    const omList = el('div');
+    omList.classList.toggle('hidden', !ui.matchOpen);
+    omOldmaidHistory.forEach((record, i) => {
+      const line = el('div', 'history-line');
+      const when = (record.at || '').slice(5, 16).replace('T', ' ');
+      line.append(el('span', undefined, T.oldmaid.historyLine(when, record.discardPairs, record.hidden ?? '')));
+      const pill = outcomePill(T, record.winner === 'player' ? 'win' : 'lose');
+      line.append(pill);
+      omList.append(line);
+    });
+    omHistory.append(omList);
+    wrap.append(omHistory);
+  }
+
+  // ── 21 点手历史 ──
+  if (state.game === 'blackjack') {
+    const history = el('div', 'history');
+    const toggle = el('button', 'history-toggle', T.historyToggle(ui.historyOpen, (state.history ?? []).length));
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => {
+      ui.historyOpen = !ui.historyOpen;
+      toggle.textContent = T.historyToggle(ui.historyOpen, (state.history ?? []).length);
+      list.classList.toggle('hidden', !ui.historyOpen);
+    }, { signal: ctx.signal });
+    history.append(toggle);
+    const list = el('div');
     list.classList.toggle('hidden', !ui.historyOpen);
-  }, { signal: ctx.signal });
-  history.append(toggle);
-  const list = el('div');
-  list.classList.toggle('hidden', !ui.historyOpen);
-  for (const record of state.history) {
-    const line = el('div', 'history-line');
-    line.append(el('span', undefined, `${T.roundLabel(record.round, record.dealer === 'ai' ? T.historyDealerAI : T.historyDealerMe, '')} ${T.chips} ${record.bet}`));
-    const handsText = record.hands.map((h) => `${h.cards.join(' ')}(${T.outcome[h.outcome] ?? h.outcome})`).join(' / ');
-    line.append(el('span', 'history-cards', `${handsText} vs ${record.dealerCards.join(' ')}`));
-    if (record.insurance > 0) {
-      line.append(el('span', undefined, `${T.chips} ${record.insurance}${record.insuranceWon ? ' ✓' : ' ✗'}`));
+    for (const record of state.history ?? []) {
+      const line = el('div', 'history-line');
+      line.append(el('span', undefined, `${T.roundLabel(record.round, record.dealer === 'ai' ? T.historyDealerAI : T.historyDealerMe, '')} ${T.chips} ${record.bet}`));
+      const handsText = record.hands.map((h) => `${h.cards.join(' ')}(${T.outcome[h.outcome] ?? h.outcome})`).join(' / ');
+      line.append(el('span', 'history-cards', `${handsText} vs ${record.dealerCards.join(' ')}`));
+      if (record.insurance > 0) {
+        line.append(el('span', undefined, `${T.chips} ${record.insurance}${record.insuranceWon ? ' ✓' : ' ✗'}`));
+      }
+      const playerDelta = record.dealer === 'ai' ? record.delta : -record.delta;
+      line.append(el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`));
+      list.append(line);
     }
-    const playerDelta = record.dealer === 'ai' ? record.delta : -record.delta;
-    line.append(el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`));
-    list.append(line);
+    history.append(list);
+    wrap.append(history);
   }
-  history.append(list);
-  wrap.append(history);
 
-  // ── 场次记录 ──
-  const matchBox = el('div', 'history');
-  const matchToggle = el('button', 'history-toggle', T.matchToggle(ui.matchOpen, state.matches.length));
-  matchToggle.type = 'button';
-  matchToggle.addEventListener('click', () => {
-    ui.matchOpen = !ui.matchOpen;
-    matchToggle.textContent = T.matchToggle(ui.matchOpen, state.matches.length);
+  // ── 场次记录(21 点) ──
+  const matches = state.matches ?? [];
+  if (state.game === 'blackjack' || matches.length > 0) {
+    const matchBox = el('div', 'history');
+    const matchToggle = el('button', 'history-toggle', T.matchToggle(ui.matchOpen, matches.length));
+    matchToggle.type = 'button';
+    matchToggle.addEventListener('click', () => {
+      ui.matchOpen = !ui.matchOpen;
+      matchToggle.textContent = T.matchToggle(ui.matchOpen, matches.length);
+      matchList.classList.toggle('hidden', !ui.matchOpen);
+    }, { signal: ctx.signal });
+    matchBox.append(matchToggle);
+    const matchList = el('div');
     matchList.classList.toggle('hidden', !ui.matchOpen);
-  }, { signal: ctx.signal });
-  matchBox.append(matchToggle);
-  const matchList = el('div');
-  matchList.classList.toggle('hidden', !ui.matchOpen);
-  if (!state.matches.length) matchList.append(el('div', 'casino-idle', T.matchEmpty));
-  for (const match of state.matches) {
-    const line = el('div', 'history-line');
-    const when = (match.at || '').slice(5, 16).replace('T', ' ');
-    line.append(el('span', undefined, T.matchLine(when, match.rounds, match.aiChips, match.playerChips, match.winner, match.playerNet)));
-    line.append(el('span', 'history-cards', `AI ${match.aiChips} / ${T.me} ${match.playerChips}`));
-    line.append(el('span', `delta ${match.winner === 'player' ? 'up' : match.winner === 'ai' ? 'down' : ''}`, T.matchWinner[match.winner]));
-    matchList.append(line);
+    if (!matches.length) matchList.append(el('div', 'casino-idle', T.matchEmpty));
+    for (const match of matches) {
+      const line = el('div', 'history-line');
+      const when = (match.at || '').slice(5, 16).replace('T', ' ');
+      line.append(el('span', undefined, T.matchLine(when, match.rounds, match.aiChips, match.playerChips, match.winner, match.playerNet)));
+      line.append(el('span', 'history-cards', `AI ${match.aiChips} / ${T.me} ${match.playerChips}`));
+      line.append(el('span', `delta ${match.winner === 'player' ? 'up' : match.winner === 'ai' ? 'down' : ''}`, T.matchWinner[match.winner]));
+      matchList.append(line);
+    }
+    matchBox.append(matchList);
+    wrap.append(matchBox);
   }
-  matchBox.append(matchList);
-  wrap.append(matchBox);
 
   // ── 规则浮层 ──
-  if (ui.rulesOpen) wrap.append(buildRules(ctx, T));
+  if (ui.rulesOpen) wrap.append(buildRules(ctx, T, state.game));
 
   // ── 错误条 ──
   wrap.append(el('div', 'casino-error'));
 }
 
-/** 规则说明浮层:右上角按钮展开,庄闲分工、点数、动作与结算一览(按浏览器语言)。 */
-function buildRules(ctx: WebUiPanelContext, T: PanelText): HTMLElement {
+/** 规则说明浮层:右上角按钮展开;内容随桌面当前游戏切换,空桌时两个游戏的规则都给(按浏览器语言)。 */
+function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'oldmaid' | null): HTMLElement {
   const overlay = el('div', 'rules-overlay');
   const card = el('div', 'rules-card');
   const tpl = document.createElement('template');
-  tpl.innerHTML = T.rulesHtml;
+  tpl.innerHTML = game === 'oldmaid'
+    ? T.rulesOldmaidHtml
+    : game === 'blackjack'
+      ? T.rulesBlackjackHtml
+      : `${T.rulesBlackjackHtml}\n${T.rulesOldmaidHtml}`;
   card.append(tpl.content.cloneNode(true));
   const close = el('button', 'rules-close', T.rulesCloseBtn);
   close.type = 'button';

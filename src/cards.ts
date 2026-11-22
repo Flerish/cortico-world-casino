@@ -65,3 +65,53 @@ export function dealerShouldHit(cards: readonly Card[], hitsSoft17: boolean): bo
   if (value.total < 17) return true;
   return hitsSoft17 && value.total === 17 && value.soft;
 }
+
+// ── 抽鬼牌(Old Maid)扩展:配对与鬼牌判定 ──
+
+/** 旧式鬼牌卡(rank 14 / suit 4);现行规则改用「藏一张普通牌」方案,牌堆里不再有鬼牌卡,保留常量供防御性判断。 */
+export const JOKER: Card = { rank: 14, suit: 4 };
+
+export function isJoker(card: Card): boolean {
+  return card.suit === 4;
+}
+
+/** 同点数两张成对(花色不限);鬼牌永不配对。 */
+export function isPair(a: Card, b: Card): boolean {
+  return !isJoker(a) && !isJoker(b) && a.rank === b.rank;
+}
+
+/** 从一手牌中摘出全部成对的牌,返回剩余单牌与成对组(抽鬼牌的弃对阶段用)。 */
+export function extractPairs(cards: readonly Card[]): { singles: Card[]; pairs: Card[][] } {
+  const byRank = new Map<number, Card[]>();
+  for (const card of cards) {
+    if (isJoker(card)) continue;
+    const list = byRank.get(card.rank) ?? [];
+    list.push(card);
+    byRank.set(card.rank, list);
+  }
+  const singles: Card[] = cards.filter((c) => isJoker(c));
+  const pairs: Card[][] = [];
+  for (const list of byRank.values()) {
+    while (list.length >= 2) {
+      const a = list.shift()!;
+      const b = list.shift()!;
+      pairs.push([a, b]);
+    }
+    singles.push(...list);
+  }
+  return { singles, pairs };
+}
+
+/** 一手牌的摘要文本(按点数计数,鬼牌单列)。 */
+export function handSummary(cards: readonly Card[]): string {
+  const jokers = cards.filter((c) => isJoker(c)).length;
+  const rest = cards.filter((c) => !isJoker(c));
+  const parts: string[] = [];
+  if (jokers > 0) parts.push(`鬼牌×${jokers}`);
+  const byRank = new Map<number, number>();
+  for (const card of rest) byRank.set(card.rank, (byRank.get(card.rank) ?? 0) + 1);
+  for (const [rank, count] of [...byRank.entries()].sort((a, b) => a[0] - b[0])) {
+    parts.push(`${count}×${RANKS[rank] ?? '?'}`);
+  }
+  return parts.join(' ');
+}
