@@ -251,8 +251,16 @@ async function send(ctx: WebUiPanelContext, T: PanelText, action: string, extra:
   }
 }
 
-/** 界面本地状态:下注输入、折叠区、规则浮层与大厅搜索词;换手时下注清零。 */
-const ui = { bet: 0, historyOpen: false, rulesOpen: false, matchOpen: false, lobbyQuery: '' };
+/** 界面本地状态:下注输入、折叠区、规则浮层、大厅搜索词与主菜单模式;换手时下注清零。 */
+const ui = {
+  bet: 0,
+  historyOpen: false,
+  rulesOpen: false,
+  matchOpen: false,
+  lobbyQuery: '',
+  /** 空桌时主菜单停留在哪个视图;一进对局就重置回菜单(返回大厅先见模式选择)。 */
+  lobbyMode: 'menu' as 'menu' | 'local' | 'online',
+};
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
 
@@ -376,6 +384,13 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .lobby-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
       gap: 10px; padding-right: 2px; max-height: 52vh; }
     .lobby-empty { text-align: center; font-size: 12px; opacity: .6; padding: 14px 0; }
+    .mode-grid { display: flex; flex-direction: column; gap: 10px; }
+    .mode-icon { font-size: 34px; width: 64px; text-align: center; flex: none; }
+    .lobby-backrow { flex: none; display: flex; }
+    .wip { text-align: center; padding: 34px 16px; }
+    .wip-icon { font-size: 40px; }
+    .wip-title { font-size: 17px; font-weight: 800; margin: 10px 0 6px; letter-spacing: 2px; }
+    .wip-desc { font-size: 13px; opacity: .8; line-height: 1.6; max-width: 380px; margin: 0 auto 14px; }
     .lobby-suits { font-size: 15px; letter-spacing: 10px; text-indent: 10px; }
     .lobby-suits .ls-black { color: #eae4d2; }
     .lobby-suits .ls-red { color: #f0a3a3; }
@@ -491,18 +506,85 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   }
   wrap.append(topbar);
 
-  // ── 空桌:游戏大厅(可滚动列表 + 搜索;以后新玩法往列表里加卡即可) ──
+  // ── 空桌:主菜单(本地模式 / 联机模式) → 本地模式里是游戏大厅 ──
+  if (state.game !== null) ui.lobbyMode = 'menu';
   if (state.game === null) {
     const felt = el('div', 'felt lobby');
     wrap.append(felt);
 
-    const head = el('div', 'lobby-head');
+    if (ui.lobbyMode === 'menu') {
+      // 主菜单:两张模式卡。
+      const head = el('div', 'lobby-head');
+      const suits = el('div', 'lobby-suits');
+      for (const [i, suit] of (['♠', '♥', '♦', '♣'] as const).entries()) {
+        suits.append(el('span', i % 2 === 0 ? 'ls-black' : 'ls-red', suit));
+      }
+      head.append(suits, el('div', 'lobby-title', T.title), el('div', 'lobby-sub', T.modeMenu.subtitle));
+      felt.append(head);
+      const grid = el('div', 'mode-grid');
+      const modes: Array<{ icon: string; title: string; tag: string; desc: string; btn: string; primary: boolean; go: 'local' | 'online' }> = [
+        { icon: '🎴', title: T.modeMenu.localTitle, tag: T.modeMenu.localTag, desc: T.modeMenu.localDesc, btn: T.modeMenu.localBtn, primary: true, go: 'local' },
+        { icon: '🌐', title: T.modeMenu.onlineTitle, tag: T.modeMenu.onlineTag, desc: T.modeMenu.onlineDesc, btn: T.modeMenu.onlineBtn, primary: false, go: 'online' },
+      ];
+      for (const m of modes) {
+        const card = el('div', 'game-card');
+        card.append(el('div', 'mode-icon', m.icon));
+        const info = el('div', 'game-info');
+        info.append(el('div', 'game-name', `${m.title} `), el('span', 'game-tag', m.tag));
+        info.append(el('div', 'game-desc', m.desc));
+        const row = el('div', 'btnrow');
+        const btn = el('button', m.primary ? 'primary' : undefined, m.btn);
+        btn.type = 'button';
+        btn.addEventListener('click', () => {
+          ui.lobbyMode = m.go;
+          if (current) render(ctx, current);
+        }, { signal: ctx.signal });
+        row.append(btn);
+        info.append(row);
+        card.append(info);
+        grid.append(card);
+      }
+      felt.append(grid);
+    } else if (ui.lobbyMode === 'online') {
+      // 联机模式占位:后续多人对局的入口。
+      const head = el('div', 'lobby-head');
+      head.append(el('div', 'lobby-title', T.modeMenu.onlineTitle), el('div', 'lobby-sub', T.modeMenu.onlineTag));
+      felt.append(head);
+      const wip = el('div', 'wip');
+      wip.append(el('div', 'wip-icon', '🚧'));
+      wip.append(el('div', 'wip-title', T.modeMenu.onlineWip));
+      wip.append(el('div', 'wip-desc', T.modeMenu.onlineWipDesc));
+      const row = el('div', 'btnrow');
+      row.style.justifyContent = 'center';
+      const back = el('button', 'primary', T.modeMenu.backBtn);
+      back.type = 'button';
+      back.addEventListener('click', () => {
+        ui.lobbyMode = 'menu';
+        if (current) render(ctx, current);
+      }, { signal: ctx.signal });
+      row.append(back);
+      wip.append(row);
+      felt.append(wip);
+    } else {
+      // ── 本地模式:游戏大厅(可滚动列表 + 搜索;以后新玩法往列表里加卡即可) ──
+      const head = el('div', 'lobby-head');
     const suits = el('div', 'lobby-suits');
     for (const [i, s] of (['♠', '♥', '♦', '♣'] as const).entries()) {
       suits.append(el('span', i % 2 === 0 ? 'ls-black' : 'ls-red', s));
     }
     head.append(suits, el('div', 'lobby-title', T.title), el('div', 'lobby-sub', T.gamePicker.title));
     felt.append(head);
+
+    // 返回主菜单(模式选择)。
+    const backRow = el('div', 'lobby-backrow');
+    const backToMenu = el('button', 'rules-btn', T.modeMenu.backToMenu);
+    backToMenu.type = 'button';
+    backToMenu.addEventListener('click', () => {
+      ui.lobbyMode = 'menu';
+      if (current) render(ctx, current);
+    }, { signal: ctx.signal });
+    backRow.append(backToMenu);
+    felt.append(backRow);
 
     // 搜索框:按游戏名/别名/描述过滤;输入时直接显隐卡片,不整体重渲染(避免丢焦点)。
     const search = el('div', 'lobby-search');
@@ -644,6 +726,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       emptyHint.style.display = visible === 0 ? '' : 'none';
     }
     applyLobbyFilter();
+    } // else:本地模式大厅结束
   }
 
   // ── 21 点桌面 ──
