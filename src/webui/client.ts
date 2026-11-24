@@ -88,6 +88,8 @@ interface Snapshot {
   discardPairs?: number;
   lastDiscards?: string[][];
   score?: { ai: number; player: number };
+  /** 「再来一局」计数(牌动画 key 用)。 */
+  oldmaidPlays?: number;
   /** 终局才亮:开局藏起来的那张牌(进行中不下发)。 */
   hiddenCard?: string | null;
   oldmaidHistory?: Array<{ at: string; draws: number; discardPairs: number; hidden?: string; winner: string }>;
@@ -1120,8 +1122,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   }
 
   // ── 抽鬼牌桌面 ──
-  if (state.game === 'oldmaid' || (state.game === null && state.winner !== undefined && state.playerCards)) {
-    const omEnded = state.game === null;
+  // ── 抽鬼牌桌面(终局态也在此:winner 非 null 即终局,牌面留在桌上) ──
+  if (state.game === 'oldmaid') {
+    const omEnded = state.winner != null;
     const omTurnOwner = state.turnOwner ?? 'player';
     const omWinner = state.winner;
     const omPlayerCards = state.playerCards ?? [];
@@ -1131,6 +1134,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const omLastDiscards = state.lastDiscards ?? [];
     const omScore = state.score ?? { ai: 0, player: 0 };
     const omOldmaidHistory = state.oldmaidHistory ?? [];
+    const omPlays = state.oldmaidPlays ?? omOldmaidHistory.length;
     const winner = omWinner;
     const playerIsIdler = omTurnOwner !== 'player';
 
@@ -1146,7 +1150,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const aiCards = el('div', 'cards');
     const canPick = !omEnded && omTurnOwner === 'player';
     for (let i = 0; i < omAiHandCount; i++) {
-      const back = cardEl('', true, { key: `om-g${omOldmaidHistory.length}-ai${i}`, kind: 'deal' });
+      const back = cardEl('', true, { key: `om-g${omPlays}-ai${i}`, kind: 'deal' });
       if (canPick) {
         back.classList.add('pickable');
         const idx = i;
@@ -1177,12 +1181,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     playerHead.append(el('span', undefined, T.me));
     playerSeat.append(playerHead);
     const playerCards = el('div', 'cards');
-    for (const text of omPlayerCards) playerCards.append(cardEl(text, false, { key: `om-g${omOldmaidHistory.length}-p${text}`, kind: 'deal' }));
+    for (const text of omPlayerCards) playerCards.append(cardEl(text, false, { key: `om-g${omPlays}-p${text}`, kind: 'deal' }));
     playerSeat.append(playerCards);
     playerSeat.append(el('div', 'total-pill', `${T.oldmaid.ownerHand(omPlayerHandCount)} · ${T.oldmaid.score(omScore.ai, omScore.player)}`));
     felt.append(playerSeat);
 
-    // ── 抽鬼牌结束横幅 ──
+    // ── 抽鬼牌结束横幅 + 场中央的「再来一局 / 返回主菜单」 ──
     const bannerBox = el('div');
     wrap.append(bannerBox);
     if (omEnded && winner) {
@@ -1191,6 +1195,16 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       banner.append(el('span', 'banner-text', playerWon ? T.oldmaid.winBanner : T.oldmaid.loseBanner));
       bannerBox.append(banner);
       if (state.hiddenCard) bannerBox.append(el('div', 'hidden-reveal', T.oldmaid.hiddenReveal(state.hiddenCard)));
+      // 不用回大厅重开:当场接着来,胜场与局历史延续。
+      const row = el('div', 'btnrow');
+      const again = el('button', 'primary', T.oldmaid.againBtn);
+      again.type = 'button';
+      again.addEventListener('click', () => void send(ctx, T, 'again'), { signal: ctx.signal });
+      const back = el('button', undefined, T.oldmaid.backLobbyBtn);
+      back.type = 'button';
+      back.addEventListener('click', () => void send(ctx, T, 'leave'), { signal: ctx.signal });
+      row.append(again, back);
+      bannerBox.append(row);
     }
 
     // ── 回合操作:玩家回合点对方背面牌,无需按钮 ──

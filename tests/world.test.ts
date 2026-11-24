@@ -216,6 +216,31 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await world.stop();
   });
 
+  it('抽鬼牌:终局「再来一局」保留胜场与局历史,未打完时拒绝', async () => {
+    // 预写一局已打完的抽鬼牌:AI 赢,胜场 1/2,已有 1 条局历史;再配可预测牌靴,重开不会秒终局。
+    rigTable({
+      game: 'oldmaid',
+      shoe: oldmaidShoe(),
+      oldmaid: {
+        winner: 'ai',
+        score: { ai: 1, player: 2 },
+        history: [{ at: '2026-11-24T12:00:00+08:00', draws: 9, discardPairs: 6, hidden: '♠7', winner: 'player' }],
+      },
+    });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    // 打完的局可以再来一局:胜场与历史延续,牌局重开。
+    const snap = await act(world, 'again');
+        expect(snap.game).toBe('oldmaid');
+    const om = snap as unknown as { winner: string | null; score: { ai: number; player: number }; oldmaidPlays: number };
+    expect(om.winner).toBeNull();
+    expect(om.score).toEqual({ ai: 1, player: 2 });
+    expect(om.oldmaidPlays).toBe(1);
+    // 重开的局还没打完:再次「再来一局」被拒。
+    await expect(act(world, 'again')).rejects.toThrow('还没打完');
+    await world.stop();
+  });
+
   it('21 点:下注校验与加倍校验仍然生效', async () => {
     rigTable({});
     const world = worldWith(zeroRng);
@@ -376,16 +401,18 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     const host = new FakeHost();
     await world.start(host);
     const snap = await act(world, 'draw');
-    expect(snap.oldmaid!.winner).toBe('ai');
-    expect(snap.oldmaid!.score).toEqual({ ai: 1, player: 0 });
-    expect(snap.oldmaid!.hiddenCard).toBe('♥5');
+    // 终局不退场:桌面保持活动,终局字段在顶层。
+    expect(snap.game).toBe('oldmaid');
+    expect(snap.winner).toBe('ai');
+    expect(snap.score).toEqual({ ai: 1, player: 0 });
+    expect(snap.hiddenCard).toBe('♥5');
     const result = host.events.find((e) => e.type === 'oldmaid.result');
     expect(result!.text).toContain('藏起来的牌是 ♥5');
     expect(result!.text).toContain('♠5');
     await world.stop();
   });
 
-  it('抽鬼牌:局结束后自动回空桌,可再开新局', async () => {
+  it('抽鬼牌:局结束留在桌面——可再来一局(胜场延续)或回大厅重开(胜场清零)', async () => {
     rigTable({
       game: 'oldmaid',
       oldmaid: { aiHand: [card(13, 1)], playerHand: [card(5, 0), card(13, 0)], turnOwner: 'player', hiddenCard: card(5, 1) },
@@ -394,11 +421,27 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     let snap = await act(world, 'draw');
-    expect(snap.oldmaid!.winner).toBe('ai');
-    snap = await act(world, 'newgame', { game: 'oldmaid' });
+    expect(snap.winner).toBe('ai');
+    // 当场再来一局:胜场延续。
+    snap = await act(world, 'again');
     expect(snap.game).toBe('oldmaid');
-    expect(typeof snap.discardPairs).toBe('number');
+    expect(snap.winner).toBeNull();
+    expect(snap.score).toEqual({ ai: 1, player: 0 });
     await world.stop();
+    // 另一条路:回大厅再开 = 全新一局,胜场清零。
+    rigTable({
+      game: 'oldmaid',
+      oldmaid: { aiHand: [card(13, 1)], playerHand: [card(5, 0), card(13, 0)], turnOwner: 'player', hiddenCard: card(5, 1) },
+      shoe: oldmaidShoe(),
+    });
+    const world2 = worldWith(zeroRng);
+    await world2.start(new FakeHost());
+    await act(world2, 'draw');
+    await act(world2, 'leave');
+    snap = await act(world2, 'newgame', { game: 'oldmaid' });
+    expect(snap.game).toBe('oldmaid');
+    expect(snap.score).toEqual({ ai: 0, player: 0 });
+    await world2.stop();
   });
 
   // ── 通用 ──

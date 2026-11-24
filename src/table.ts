@@ -79,6 +79,8 @@ export interface OldMaidState {
   winner: 'ai' | 'player' | null;
   /** 场次胜场数。 */
   score: { ai: number; player: number };
+  /** 「再来一局」的计数(牌动画的 key 用,旧档无此键)。 */
+  plays?: number;
   history: OldMaidRecord[];
 }
 

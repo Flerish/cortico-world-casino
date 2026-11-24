@@ -239,6 +239,7 @@ const zh = {
   sessionArchived: (game: string, rounds: number, winnerLabel: string) => `主人在面板上选择不继续上一局,${game}的未完对局已作废归档(共 ${rounds} 手/局,按筹码算${winnerLabel});筹码不清零。这一局没什么好复盘的,主人重新开了新局。`,
   statusPausedGames: (names: string) => `桌上还有没打完的对局:${names}。主人在面板上打开对应游戏时可以继续或重新开始。`,
   errNothingToResume: '那个游戏没有可以继续的对局。',
+  errAgainOnlyFinished: '这一局还没打完,打完才能再来一局。',
   errUnknownActionPanel: (action: string) => `未知动作 ${action}。`,
 };
 
@@ -458,6 +459,7 @@ const en: ModelText = {
   sessionArchived: (game, rounds, winnerLabel) => `The owner chose not to continue; the unfinished ${game} was voided and archived (${rounds} hand(s)/game(s), by chips ${winnerLabel}); chips were not reset. Nothing to review there — they started a fresh game.`,
   statusPausedGames: (names) => `There are unfinished games on the table: ${names}. When the owner opens one on the panel they can continue it or start over.`,
   errNothingToResume: 'There is no saved game to continue for that one.',
+  errAgainOnlyFinished: 'This game is not finished yet; play it out before starting another.',
   errUnknownActionPanel: (action) => `Unknown action ${action}.`,
 };
 

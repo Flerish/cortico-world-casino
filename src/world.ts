@@ -886,10 +886,17 @@ export class CasinoWorld implements World {
   // ---------------------------------------------------------------- 抽鬼牌对局
 
   /** 开一局抽鬼牌:53 张轮流发完,双方自动弃初始对子,玩家先抽。 */
-  private startOldMaid(): void {
+  private startOldMaid(keepScore = false): void {
     const state = this.state!;
+    const prev = keepScore ? state.oldmaid : null;
     state.game = 'oldmaid';
     state.oldmaid = newOldMaidState();
+    if (prev) {
+      // 「再来一局」:胜场与局历史延续,只换牌局。
+      state.oldmaid.score = prev.score;
+      state.oldmaid.history = prev.history;
+      state.oldmaid.plays = (prev.plays ?? 0) + 1;
+    }
     const om = state.oldmaid;
     // 抽鬼牌每局都用整副 52 张(21 点剩下的牌靴不续用,保证恰好凑出一张同点落单的鬼牌)。
     // 测试 rig 走预写路径:drawn=0 且整副 52 张时按原序当牌堆用,发牌结果可预测。
@@ -980,7 +987,8 @@ export class CasinoWorld implements World {
       winner,
     };
     recordOldMaid(state, record);
-    state.game = null;
+    // 终局不退场:game 保持 'oldmaid',winner 非 null 即终局态——牌面留在桌上,
+    // 面板在桌中央给「再来一局 / 返回主菜单」;winner 非 null 的局不算挂起、不可续局。
     this.save();
     this.broadcast();
     const line = mt.oldMaidEndLine(
@@ -1537,6 +1545,15 @@ export class CasinoWorld implements World {
       await this.resumeActiveGame();
       return this.snapshot();
     }
+    if (action === 'again') {
+      // 再来一局:仅限已打完的抽鬼牌(21 点/德州有自然的下一注/下一手流程,不需要)。
+      // 胜场与局历史延续,重新藏牌、重新发牌。
+      if (state.game !== 'oldmaid' || !state.oldmaid?.winner) throw new Error(mt.errAgainOnlyFinished);
+      this.startOldMaid(true);
+      this.save();
+      this.broadcast();
+      return this.snapshot();
+    }
     if (action === 'leave') {
       // 返回大厅:对局挂起而非作废——再开同一游戏时面板会问「继续还是重新开始」。
       // settle 模型下筹码全程未动账,挂起无损;异步中段(庄家打牌/发牌)不允许中途离开。
@@ -1742,6 +1759,9 @@ export class CasinoWorld implements World {
         discardPairs: om.discards.length,
         lastDiscards: om.discards.slice(-3).map((pair) => formatHand(pair)),
         score: om.score,
+        // 泄底原则:开局藏的牌只在终局亮出。
+        hiddenCard: om.winner ? (om.hiddenCard ? formatCard(om.hiddenCard) : null) : null,
+        oldmaidPlays: om.plays ?? 0,
         oldmaidHistory: om.history.slice(0, 10),
       };
     }
