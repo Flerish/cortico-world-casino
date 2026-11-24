@@ -54,6 +54,8 @@ interface Snapshot {
   game: 'blackjack' | 'oldmaid' | 'holdem' | null;
   /** 有未完对局的游戏(打开时面板弹「继续/重新开始」)。 */
   pausedGames?: Array<'blackjack' | 'oldmaid' | 'holdem'>;
+  /** 各游戏自己的筹码(筹码按游戏分开计)。 */
+  gameChips?: Partial<Record<'blackjack' | 'holdem', { ai: number; player: number }>>;
   ai: SeatView;
   player: SeatView;
   minBet: number;
@@ -335,6 +337,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .game-tag { font-size: 10px; font-weight: 700; letter-spacing: 2px; opacity: .55; }
     .game-tag.paused { color: #e8c96a; opacity: 1; }
     .game-desc { font-size: 12px; opacity: .8; line-height: 1.55; margin: 4px 0 8px; }
+    .game-chips { font-size: 11px; font-weight: 600; color: #e8c96a; opacity: .95; margin: -4px 0 8px; }
     .game-card .btnrow { margin-top: 0; gap: 6px; }
     .game-card .btnrow button { padding: 5px 14px; font-size: 12px; flex: none; }
     .betbuild { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
@@ -466,6 +469,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     bjName.append(el('span', undefined, T.gamePicker.blackjackTitle), el('span', 'game-tag', T.gamePicker.blackjackTag));
     if (paused.includes('blackjack')) bjName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
     bjInfo.append(bjName, el('div', 'game-desc', T.gamePicker.blackjackDesc));
+    const bjChips = state.gameChips?.blackjack;
+    if (bjChips) bjInfo.append(el('div', 'game-chips', T.gamePicker.chipsLine(bjChips.ai, bjChips.player)));
     const bjBtns = el('div', 'btnrow');
     const bjAI = el('button', 'primary', T.gamePicker.blackjackAI);
     bjAI.type = 'button';
@@ -517,6 +522,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     heName.append(el('span', undefined, T.gamePicker.holdemTitle), el('span', 'game-tag', T.gamePicker.holdemTag));
     if (paused.includes('holdem')) heName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
     heInfo.append(heName, el('div', 'game-desc', T.gamePicker.holdemDesc));
+    const heChips = state.gameChips?.holdem;
+    if (heChips) heInfo.append(el('div', 'game-chips', T.gamePicker.chipsLine(heChips.ai, heChips.player)));
     const heBtns = el('div', 'btnrow');
     const heBtn = el('button', 'primary', T.gamePicker.holdemStart);
     heBtn.type = 'button';

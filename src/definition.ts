@@ -13,7 +13,7 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
     tools: describeTools(CASINO_TOOL_DECLS, {
       casino_table: { zh: '看牌桌状态:当前游戏、轮到谁、双方的牌与筹码;查三个游戏的历史。', en: 'Read the table state, the running score and the games history.' },
       casino_player: { zh: '以 21 点闲家身份行动:下注开手、要牌、停牌、加倍、分牌、保险、投降。庄家由引擎按规则自动打。', en: 'Act as the blackjack player: bet, hit, stand, double, split, insurance, surrender. The dealer is played by the engine.' },
-      casino_bank: { zh: '查筹码账户;破产时领救济金。', en: 'Read the chip account; take bankruptcy relief when broke.' },
+      casino_bank: { zh: '查筹码账户(筹码按游戏分开计,这里显示的是当前对局);破产时领救济金。', en: 'Read the chip account (chips are tracked per game; this shows the current one); take bankruptcy relief when broke.' },
       oldmaid_draw: { zh: '抽鬼牌里轮到你时,从{{owner}}手中随机抽一张牌。', en: 'Draw one random card from the owner hand on your Old Maid turn.' },
       holdem_act: { zh: '德州扑克里轮到你时行动:弃牌、过牌、跟注、下注、加注(下注/加注要带金额)。', en: 'Act on your Hold\'em turn: fold, check, call, bet or raise (bet and raise take an amount).' },
     }),

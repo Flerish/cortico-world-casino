@@ -84,6 +84,8 @@ function rigTable(patch: {
         }
       : null,
     drawn: 0,
+    gameSeats: {},
+    seatsOwner: null,
   };
   writeFileSync(join(dir, 'casino-table.json'), JSON.stringify(state), 'utf8');
 }
@@ -185,11 +187,42 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await world.stop();
   });
 
-  it('21 点:下注校验与加倍校验仍然生效', async () => {
-    rigTable({ playerChips: 15 });
+  it('筹码按游戏分开:各局独立计,重新开始回初始筹码,归档记录该局筹码', async () => {
+    // 21 点先打赢一手:玩家 A♠+K♥ 自然黑杰克,庄 5♦9♣,+75。
+    rigTable({ shoe: [card(1, 0), card(13, 1), card(5, 2), card(9, 3)] });
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    const bjSnap = await act(world, 'bet', { amount: 50 });
+    expect(bjSnap.player.chips).toBe(1075);
+    await act(world, 'leave'); // 21 点挂起,筹码 1075 存进它的槽位
+    // 开德州:全新一局,以初始筹码起算,不受 21 点影响。
+    const heSnap = await act(world, 'newgame', { game: 'holdem' });
+    expect(heSnap.player.chips).toBe(1000);
+    expect(heSnap.ai.chips).toBe(1000);
+    const chips = (heSnap as unknown as { gameChips: { blackjack?: { player: number } } }).gameChips;
+    expect(chips.blackjack!.player).toBe(1075); // 大厅卡片能看到 21 点挂起局的筹码
+    await act(world, 'leave'); // 德州空局挂起
+    // 续 21 点:筹码原样回来。
+    const resumeSnap = await act(world, 'resume', { game: 'blackjack' });
+    expect(resumeSnap.player.chips).toBe(1075);
+    await act(world, 'leave');
+    // 重新开始 21 点:作废归档(记录的是该局自己的筹码),新局回初始筹码。
+    const freshSnap = await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    expect(freshSnap.player.chips).toBe(1000);
+    const matches = (freshSnap as unknown as { matches: Array<{ playerChips: number; winner: string }> }).matches;
+    expect(matches[0]!.playerChips).toBe(1075);
+    expect(matches[0]!.winner).toBe('player');
+    await world.stop();
+  });
+
+  it('21 点:下注校验与加倍校验仍然生效', async () => {
+    rigTable({});
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    // 新开局以初始筹码起算(筹码按游戏分开);这里把本局座位改成 15 来校验上下限。
+    ((world as unknown as { state: TableState }).state).player.chips = 15;
     await expect(act(world, 'bet', { amount: 500 })).rejects.toThrow('单手上限 200');
     await expect(act(world, 'bet', { amount: 30 })).rejects.toThrow('余额 15,押不起 30');
     await act(world, 'bet', { amount: 10 });
@@ -487,6 +520,8 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
       player: newSeat(1000),
       shoe: [],
       drawn: 0,
+      gameSeats: {},
+      seatsOwner: null,
     };
     await expect(act(world, 'leave')).rejects.toThrow();
 

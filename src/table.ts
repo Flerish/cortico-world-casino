@@ -161,6 +161,10 @@ export interface TableState {
   player: SeatState;
   shoe: Card[];
   drawn: number;
+  /** 每个游戏独立的座位(筹码+战绩,互不干涉);ai/player 是当前活动局的实时副本。 */
+  gameSeats: Partial<Record<'blackjack' | 'oldmaid' | 'holdem', { ai: SeatState; player: SeatState }>>;
+  /** 全局 ai/player 座位属于哪个游戏(筹码按游戏分开计的归属标记)。 */
+  seatsOwner: 'blackjack' | 'oldmaid' | 'holdem' | null;
 }
 
 export function newSeat(startChips: number): SeatState {
@@ -230,6 +234,8 @@ export function newTable(startChips: number): TableState {
     player: newSeat(startChips),
     shoe: [],
     drawn: 0,
+    gameSeats: {},
+    seatsOwner: null,
   };
 }
 
@@ -259,10 +265,12 @@ export function formatHand(cards: readonly Card[]): string[] {
 }
 
 /** 0.5.x 的平面存档结构(没有 blackjack / oldmaid / holdem 子对象键)。 */
-type LegacyTableState = Omit<TableState, 'blackjack' | 'oldmaid' | 'holdem'> & {
+type LegacyTableState = Omit<TableState, 'blackjack' | 'oldmaid' | 'holdem' | 'gameSeats' | 'seatsOwner'> & {
   blackjack?: BlackjackState;
   oldmaid?: OldMaidState;
   holdem?: HoldemState;
+  gameSeats?: TableState['gameSeats'];
+  seatsOwner?: TableState['seatsOwner'];
 };
 
 /** 读桌面存档;损坏、不存在或形状对不上(旧版本)时返回 null,由调用方决定开新桌。 */
@@ -285,11 +293,25 @@ export function loadTable(dataDir: string): TableState | null {
         player: parsed.player,
         shoe: Array.isArray(parsed.shoe) ? parsed.shoe : [],
         drawn: typeof parsed.drawn === 'number' ? parsed.drawn : 0,
+        gameSeats: {},
+        seatsOwner: null,
       };
     }
     // 0.6.x 存档没有 holdem 子对象(0.6.2 及更早):补 null 键,其余原样保留。
     if (parsed.holdem === undefined) {
-      return { ...(parsed as TableState), holdem: null };
+      return { ...(parsed as TableState), holdem: null, gameSeats: {}, seatsOwner: null };
+    }
+    // 0.7.0 开发档没有 gameSeats(筹码当时全局共享):把全局座位回填给挂起的筹码游戏。
+    if (parsed.gameSeats === undefined) {
+      const seats = { ai: parsed.ai, player: parsed.player };
+      const gameSeats: TableState['gameSeats'] = {};
+      if (parsed.blackjack) gameSeats.blackjack = seats;
+      if (parsed.holdem) gameSeats.holdem = seats;
+      return {
+        ...(parsed as TableState),
+        gameSeats,
+        seatsOwner: parsed.blackjack ? 'blackjack' : parsed.holdem ? 'holdem' : null,
+      };
     }
     return parsed as TableState;
   } catch {

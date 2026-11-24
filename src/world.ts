@@ -260,6 +260,32 @@ export class CasinoWorld implements World {
     this.host = null;
   }
 
+  /** 把当前全局座位存回所属游戏的槽位(筹码按游戏分开计;全局座位只是活动局的实时副本)。 */
+  private stashSeats(): void {
+    const state = this.state!;
+    if (state.seatsOwner) state.gameSeats[state.seatsOwner] = { ai: state.ai, player: state.player };
+  }
+
+  /** 载入某游戏的座位:槽位有就原样续(挂起恢复),全局座位本来就属于它则不动。 */
+  private loadSeatsFor(game: 'blackjack' | 'holdem'): void {
+    const state = this.state!;
+    if (state.seatsOwner === game) return;
+    const slot = state.gameSeats[game];
+    state.ai = slot?.ai ?? newSeat(this.opts.cfg.startChips);
+    state.player = slot?.player ?? newSeat(this.opts.cfg.startChips);
+    state.seatsOwner = game;
+  }
+
+  /** 全新开局(第一次打开或重新开始):这个游戏以初始筹码起算,旧槽位丢弃。 */
+  private freshSeatsFor(game: 'blackjack' | 'holdem'): void {
+    const state = this.state!;
+    if (state.seatsOwner && state.seatsOwner !== game) this.stashSeats();
+    delete state.gameSeats[game];
+    state.ai = newSeat(this.opts.cfg.startChips);
+    state.player = newSeat(this.opts.cfg.startChips);
+    state.seatsOwner = game;
+  }
+
   /** 挂起的未完对局(面板据此弹「继续/重新开始」;抽鬼牌打完亮结果的不算;活动中的不算)。 */
   private pausedGames(): Array<'blackjack' | 'oldmaid' | 'holdem'> {
     const state = this.state!;
@@ -310,15 +336,22 @@ export class CasinoWorld implements World {
     const played = game === 'blackjack' && bj ? Math.max(0, bj.round - 1)
       : game === 'holdem' && hm ? Math.max(0, hm.round - 1)
         : game === 'oldmaid' && om ? om.score.ai + om.score.player : 0;
-    const winner: MatchRecord['winner'] =
-      state.ai.chips > state.player.chips ? 'ai' : state.player.chips > state.ai.chips ? 'player' : 'tie';
+    // 筹码按游戏分开:归档用这个游戏自己的座位(全局座位可能属于另一个游戏)。
+    const seats = state.seatsOwner === game
+      ? { ai: state.ai, player: state.player }
+      : (game !== 'oldmaid' ? state.gameSeats[game] : undefined);
+    const aiChips = seats?.ai.chips ?? state.ai.chips;
+    const playerChips = seats?.player.chips ?? state.player.chips;
+    const winner: MatchRecord['winner'] = game === 'oldmaid' && om
+      ? om.score.ai > om.score.player ? 'ai' : om.score.player > om.score.ai ? 'player' : 'tie'
+      : aiChips > playerChips ? 'ai' : playerChips > aiChips ? 'player' : 'tie';
     this.matches = [{
       at: nowIso(this.opts.timezone),
       rounds: played,
-      aiChips: state.ai.chips,
-      playerChips: state.player.chips,
-      aiNet: state.ai.net,
-      playerNet: state.player.net,
+      aiChips,
+      playerChips,
+      aiNet: seats?.ai.net ?? state.ai.net,
+      playerNet: seats?.player.net ?? state.player.net,
       winner,
     }, ...this.matches].slice(0, MATCHES_LIMIT);
     saveMatches(this.opts.dataDir, this.matches);
@@ -1469,6 +1502,7 @@ export class CasinoWorld implements World {
       if (game === 'blackjack') {
         const dealer = String(arg.dealer ?? '');
         if (dealer !== 'ai' && dealer !== 'player') throw new Error(mt.errNewgameDealerArg);
+        this.freshSeatsFor('blackjack'); // 筹码按游戏分开:重新开局以初始筹码起算
         state.game = 'blackjack';
         state.blackjack = newBlackjackState(dealer === 'ai' ? 'dealer' : 'player');
         this.save();
@@ -1477,6 +1511,7 @@ export class CasinoWorld implements World {
         return this.snapshot();
       }
       if (game === 'holdem') {
+        this.freshSeatsFor('holdem');
         this.startHoldem();
         return this.snapshot();
       }
@@ -1495,6 +1530,8 @@ export class CasinoWorld implements World {
       };
       if (!paused[game]) throw new Error(mt.errNothingToResume);
       state.game = game as TableState['game'];
+      // 筹码按游戏分开:换回这个游戏的座位(原样续,不清不变)。
+      if (game === 'blackjack' || game === 'holdem') this.loadSeatsFor(game);
       this.save();
       this.broadcast();
       await this.resumeActiveGame();
@@ -1506,7 +1543,13 @@ export class CasinoWorld implements World {
       if (state.game === null) return this.snapshot();
       if (state.blackjack?.dealerActing) throw new Error(mt.dealerTurnInProgress);
       if (state.holdem && state.holdem.phase === 'runout') throw new Error(mt.holdemDealing);
+      const leaving = state.game;
       state.game = null;
+      // 离开前把当前座位存回所属游戏的槽位(筹码保持离开时的样子)。
+      if (leaving === 'blackjack' || leaving === 'holdem') {
+        state.seatsOwner = leaving;
+        this.stashSeats();
+      }
       this.save();
       this.broadcast();
       return this.snapshot();
@@ -1643,6 +1686,11 @@ export class CasinoWorld implements World {
       version: state.version,
       game: state.game,
       pausedGames: this.pausedGames(),
+      /** 各游戏自己的筹码(挂起局的存档;筹码按游戏分开计)。 */
+      gameChips: {
+        blackjack: state.gameSeats.blackjack && { ai: state.gameSeats.blackjack.ai.chips, player: state.gameSeats.blackjack.player.chips },
+        holdem: state.gameSeats.holdem && { ai: state.gameSeats.holdem.ai.chips, player: state.gameSeats.holdem.player.chips },
+      },
       ai: seatView(state.ai),
       player: seatView(state.player),
       minBet: this.opts.cfg.minBet,
@@ -1805,6 +1853,8 @@ export class CasinoWorld implements World {
     state.blackjack = null;
     state.oldmaid = null;
     state.holdem = null;
+    state.gameSeats = {};
+    state.seatsOwner = null;
     this.save();
     this.broadcast();
     void this.host?.pushEvent({

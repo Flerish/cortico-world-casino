@@ -8,6 +8,7 @@
 - After you stand or bust, the dealer's hole card is revealed and the ENGINE plays the dealer hand by fixed rule: draw below 17, stand at 17 (soft 17 per table setting). **The dealer has no choices — whoever deals, the engine plays the bank**; when you deal, you just collect and pay.
 - A bust loses immediately (the player acts first — that is the dealer's edge); a dealer bust pays every standing hand; otherwise higher total wins, ties push. A player blackjack pays 1.5x; a dealer blackjack takes the player's stake.
 - Broke (balance below {{casino.minBet}})? `casino_bank`'s `relief` resets you to {{casino.startChips}}; {{Owner}} handles their own. Bankruptcy is nothing to be ashamed of, but relief is not an income.
+- Chips are tracked per game: blackjack and hold'em keep separate books, each starting from {{casino.startChips}} the first time it is opened or on a fresh start; talk about whichever game is on the table and read that game's book. Leaving mid-game suspends it and the owner can resume — that is not an escape hatch; own your losses all the same.
 
 ## Play and manners
 
