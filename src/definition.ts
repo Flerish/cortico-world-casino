@@ -26,6 +26,7 @@ export const CASINO: WorldDefinition<CasinoConfigSection> = {
       { type: 'holdem.turn', description: { zh: '德州扑克里轮到 AI 行动(弃/过/跟/下注/加注)。', en: 'The AI turn to act in Hold\'em (fold/check/call/bet/raise).' } },
       { type: 'holdem.action', description: { zh: '{{owner}}在德州扑克里的动作:开新手、过牌、下注、加注、跟注或弃牌。', en: 'One of the owner moves in Hold\'em: dealing a hand, checking, betting, raising, calling or folding.' } },
       { type: 'holdem.result', description: { zh: '一手德州扑克结算:底池归属、成牌与筹码变化。', en: 'A Hold\'em hand settled: pot winner, made hands and the chip transfer.' } },
+      { type: 'casino.invite', description: { zh: '开启「AI 主动邀约」且空桌挂载时触发:邀请 AI 主动开口约主人玩一局。', en: 'Fires on an empty-table mount when AI invitations are enabled: prompts the AI to ask the owner for a game.' } },
     ],
   },
 };

@@ -142,6 +142,11 @@ const zh = {
     holdemTag: "HOLD 'EM",
     holdemDesc: '两人单挑:两张底牌加五张公共牌,限注单挑——庄位每手轮换,加注封顶,平局分池。',
     holdemStart: '开局',
+    searchPlaceholder: '搜索游戏…',
+    noMatch: '没有匹配的游戏。',
+    blackjackKw: ['21点', '二十一点', '21 点', 'blackjack', '比点', '庄家', 'bj'],
+    oldmaidKw: ['抽鬼牌', '鬼牌', 'old maid', 'oldmaid', '抽牌'],
+    holdemKw: ['德州', '德州扑克', '扑克', 'holdem', "hold 'em", 'texas', '单挑', 'poker'],
   },
   oldmaid: {
     yourTurn: '轮到你:点对方一张背面牌,把它抽走',
@@ -340,6 +345,11 @@ const en: PanelText = {
     holdemTag: 'HEADS-UP',
     holdemDesc: 'Two players, two hole cards and five community cards; capped-limit heads-up — the button swaps every hand, ties split the pot.',
     holdemStart: 'Start',
+    searchPlaceholder: 'Search games…',
+    noMatch: 'No matching game.',
+    blackjackKw: ['blackjack', '21', 'twenty-one', 'dealer', 'bj', '二十一点', '21点'],
+    oldmaidKw: ['old maid', 'oldmaid', 'draw', '抽鬼牌', '鬼牌'],
+    holdemKw: ["hold'em", 'hold em', 'holdem', 'texas', 'poker', 'heads-up', '德州', '德州扑克'],
   },
   oldmaid: {
     yourTurn: 'Your turn: click a face-down card to take it',

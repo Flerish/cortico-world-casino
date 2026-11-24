@@ -188,8 +188,8 @@ async function send(ctx: WebUiPanelContext, T: PanelText, action: string, extra:
   }
 }
 
-/** 界面本地状态:下注输入、折叠区与规则浮层;换手时下注清零。 */
-const ui = { bet: 0, historyOpen: false, rulesOpen: false, matchOpen: false };
+/** 界面本地状态:下注输入、折叠区、规则浮层与大厅搜索词;换手时下注清零。 */
+const ui = { bet: 0, historyOpen: false, rulesOpen: false, matchOpen: false, lobbyQuery: '' };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
 
@@ -299,7 +299,17 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .btnrow button.primary { background: #c8a44a; color: #26200e; }
     .btnrow button.danger { background: #b34355; color: #fff; }
     .lobby { padding: 18px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
-    .lobby-head { text-align: center; margin-bottom: 2px; }
+    .lobby-head { text-align: center; margin-bottom: 2px; flex: none; }
+    .lobby-search { flex: none; display: flex; align-items: center; gap: 8px; background: rgba(0,0,0,.30);
+      border: 1px solid rgba(244,239,226,.20); border-radius: 999px; padding: 7px 14px; }
+    .lobby-search:focus-within { border-color: rgba(244,239,226,.55); }
+    .lobby-search .search-icon { font-size: 13px; opacity: .6; flex: none; }
+    .lobby-search input { flex: 1 1 auto; min-width: 0; background: none; border: none; outline: none;
+      color: #f4efe2; font-size: 13px; font-family: inherit; }
+    .lobby-search input::placeholder { color: rgba(244,239,226,.45); }
+    .lobby-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column;
+      gap: 10px; padding-right: 2px; max-height: 52vh; }
+    .lobby-empty { text-align: center; font-size: 12px; opacity: .6; padding: 14px 0; }
     .lobby-suits { font-size: 15px; letter-spacing: 10px; text-indent: 10px; }
     .lobby-suits .ls-black { color: #eae4d2; }
     .lobby-suits .ls-red { color: #f0a3a3; }
@@ -375,7 +385,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   topbar.append(rulesBtn);
   wrap.append(topbar);
 
-  // ── 空桌:游戏大厅 ──
+  // ── 空桌:游戏大厅(可滚动列表 + 搜索;以后新玩法往列表里加卡即可) ──
   if (state.game === null) {
     const felt = el('div', 'felt lobby');
     wrap.append(felt);
@@ -387,6 +397,29 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     }
     head.append(suits, el('div', 'lobby-title', T.title), el('div', 'lobby-sub', T.gamePicker.title));
     felt.append(head);
+
+    // 搜索框:按游戏名/别名/描述过滤;输入时直接显隐卡片,不整体重渲染(避免丢焦点)。
+    const search = el('div', 'lobby-search');
+    search.append(el('span', 'search-icon', '🔍'));
+    const searchInput = document.createElement('input');
+    searchInput.type = 'search';
+    searchInput.placeholder = T.gamePicker.searchPlaceholder;
+    searchInput.value = ui.lobbyQuery;
+    searchInput.addEventListener('input', () => {
+      ui.lobbyQuery = searchInput.value;
+      applyLobbyFilter();
+    }, { signal: ctx.signal });
+    search.append(searchInput);
+    felt.append(search);
+
+    const list = el('div', 'lobby-list');
+    felt.append(list);
+    const emptyHint = el('div', 'lobby-empty', T.gamePicker.noMatch);
+    emptyHint.style.display = 'none';
+    felt.append(emptyHint);
+
+    /** 大厅卡登记表:el 卡片元素,kw 过滤关键词(小写)。 */
+    const lobbyEntries: Array<{ el: HTMLElement; kw: string[] }> = [];
 
     // 21 点卡:♠A + ♥K 明牌装饰(blackjack 本义就是黑桃 A + J)
     const bjCard = el('div', 'game-card');
@@ -407,7 +440,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     bjBtns.append(bjAI, bjMe);
     bjInfo.append(bjBtns);
     bjCard.append(bjInfo);
-    felt.append(bjCard);
+    list.append(bjCard);
+    lobbyEntries.push({ el: bjCard, kw: T.gamePicker.blackjackKw });
 
     // 抽鬼牌卡:三张背面牌,最后一张微斜——藏着鬼牌的悬念
     const omCard = el('div', 'game-card');
@@ -429,7 +463,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     omBtns.append(omBtn);
     omInfo.append(omBtns);
     omCard.append(omInfo);
-    felt.append(omCard);
+    list.append(omCard);
+    lobbyEntries.push({ el: omCard, kw: T.gamePicker.oldmaidKw });
 
     // 德州卡:两张背面底牌 + 三张公共牌的悬念
     const heCard = el('div', 'game-card');
@@ -451,7 +486,21 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     heBtns.append(heBtn);
     heInfo.append(heBtns);
     heCard.append(heInfo);
-    felt.append(heCard);
+    list.append(heCard);
+    lobbyEntries.push({ el: heCard, kw: T.gamePicker.holdemKw });
+
+    /** 按当前搜索词显隐卡片;全部被滤掉时给一条空提示。 */
+    function applyLobbyFilter(): void {
+      const q = ui.lobbyQuery.trim().toLowerCase();
+      let visible = 0;
+      for (const entry of lobbyEntries) {
+        const hit = q === '' || entry.kw.some((k) => k.includes(q));
+        entry.el.style.display = hit ? '' : 'none';
+        if (hit) visible++;
+      }
+      emptyHint.style.display = visible === 0 ? '' : 'none';
+    }
+    applyLobbyFilter();
   }
 
   // ── 21 点桌面 ──

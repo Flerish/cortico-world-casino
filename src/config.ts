@@ -16,6 +16,8 @@ export interface CasinoConfigSection {
   dealDelayMs: number;
   /** 德州扑克的大盲注(小盲自动 = 大盲的一半向下取整);也是德州单街加注的封顶线。热改:下一手生效。 */
   holdemBlind: number;
+  /** AI 主动邀约:牌桌挂载且空桌时,AI 会主动开口邀请主人玩一局。热改:下次挂载生效。 */
+  proactiveInvite: boolean;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -26,6 +28,7 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   dealerHitsSoft17: false,
   dealDelayMs: 700,
   holdemBlind: 10,
+  proactiveInvite: false,
 };
 
 const TEXT = {
@@ -37,6 +40,7 @@ const TEXT = {
     dealerHitsSoft17: { title: '庄家软 17 补牌(H17)', description: '开 = 庄家软 17 也要牌;关 = 软 17 停牌(S17,默认)。' },
     dealDelayMs: { title: '发牌停顿(毫秒)', description: '庄家翻暗牌、每补一张牌之间的停顿,让牌面看得清;0 = 不停顿。' },
     holdemBlind: { title: '德州大盲注', description: '德州扑克的大盲注(小盲 = 其一半向下取整);同时是德州的加注封顶线。' },
+    proactiveInvite: { title: 'AI 主动邀约', description: '开启后,牌桌挂载且空桌时 AI 会主动开口邀请你玩一局;关 = 只等你来点。' },
   },
   en: {
     title: 'Moonlit Table',
@@ -46,6 +50,7 @@ const TEXT = {
     dealerHitsSoft17: { title: 'Dealer hits soft 17 (H17)', description: 'On = dealer draws to soft 17; off = dealer stands on all 17s (S17, default).' },
     dealDelayMs: { title: 'Deal pacing (ms)', description: 'Pause between the hole-card reveal and each dealer draw; 0 = no pacing.' },
     holdemBlind: { title: 'Hold\'em big blind', description: 'The Texas Hold\'em big blind (small blind = half, rounded down); it also caps each betting street in Hold\'em.' },
+    proactiveInvite: { title: 'AI invitations', description: 'When on, the AI speaks up and invites you to play whenever the table mounts empty; off = it waits for you.' },
   },
 } as const;
 
@@ -103,6 +108,12 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           title: t.holdemBlind.title,
           description: t.holdemBlind.description,
           minimum: 2,
+          'x-hot': true,
+        },
+        'worlds.casino.proactiveInvite': {
+          type: 'boolean',
+          title: t.proactiveInvite.title,
+          description: t.proactiveInvite.description,
           'x-hot': true,
         },
       },

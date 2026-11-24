@@ -255,6 +255,18 @@ export class CasinoWorld implements World {
         this.notifyHoldemTurn();
       }
     }
+    if (this.opts.cfg.proactiveInvite && this.state.game === null) {
+      // AI 主动邀约:空桌挂载时让 AI 开口邀请主人玩一局。
+      const mt = this.mt();
+      void this.host?.pushEvent({
+        type: 'casino.invite',
+        ts: nowIso(this.opts.timezone),
+        source: this.id,
+        origin: 'internal',
+        senderKey: this.id,
+        text: mt.casinoInvite,
+      }, { trigger: 'flush' });
+    }
   }
 
   async stop(): Promise<void> {

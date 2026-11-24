@@ -235,6 +235,7 @@ const zh = {
   matchResetDealerPlaying: '庄家正在按规则打牌,等这一手结算完再归档重开。',
   errNewgameDealerArg: '庄家要写 ai 或 player。',
   errAINotWaiting: '现在没有在等 AI。',
+  casinoInvite: '月下牌桌空着呢。主动邀请{{owner}}来玩一局:在聊天里自然地提起牌桌,提议玩 21 点、抽鬼牌或德州扑克之一,说说你为什么想玩这个;可以顺带提一句目前的战绩(筹码或胜场)。别自作主张开局,主人答应后等他自己在面板上选游戏,或询问他想玩哪个再等他点头。一次就好,别反复催。',
   errUnknownActionPanel: (action: string) => `未知动作 ${action}。`,
 };
 
@@ -450,6 +451,7 @@ const en: ModelText = {
   matchResetDealerPlaying: 'The dealer is playing by the rules; wait for the hand to settle before archiving.',
   errNewgameDealerArg: 'The dealer must be ai or player.',
   errAINotWaiting: 'The AI is not waiting for anything right now.',
+  casinoInvite: 'The card table sits empty. Proactively invite {{owner}} for a game: bring it up naturally in chat, suggest one of blackjack, Old Maid or Texas Hold\'em, and say why you feel like it; mentioning the current score (chips or wins) is a nice touch. Do not start the game yourself — once they agree, wait for them to pick on the panel, or ask which one they want and wait for a yes. Ask once; do not nag.',
   errUnknownActionPanel: (action) => `Unknown action ${action}.`,
 };
 

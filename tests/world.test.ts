@@ -703,4 +703,31 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     const boat = bestPokerHand([card(13, 0), card(13, 1), card(13, 2), card(5, 0), card(5, 1), card(2, 2), card(3, 3)]);
     expect(comparePokerHands(quads.rank, boat.rank)).toBeGreaterThan(0);
   });
+
+  it('主动邀约:开启且空桌挂载时发 casino.invite;进行中对局或默认关闭时不发', async () => {
+    // 默认关:不发。
+    const off = worldWith(zeroRng);
+    const offHost = new FakeHost();
+    await off.start(offHost);
+    expect(offHost.events.some((e) => e.type === 'casino.invite')).toBe(false);
+    await off.stop();
+
+    // 开 + 空桌:发。
+    const on = worldWith(zeroRng, { proactiveInvite: true });
+    const onHost = new FakeHost();
+    await on.start(onHost);
+    const invite = onHost.events.find((e) => e.type === 'casino.invite');
+    expect(invite).toBeDefined();
+    expect(invite!.text).toContain('月下牌桌');
+    expect(onHost.pushOpts.at(-1)?.trigger).toBe('flush');
+    await on.stop();
+
+    // 开但对局进行中:不发(不催)。
+    rigTable({ game: 'blackjack' });
+    const busy = worldWith(zeroRng, { proactiveInvite: true });
+    const busyHost = new FakeHost();
+    await busy.start(busyHost);
+    expect(busyHost.events.some((e) => e.type === 'casino.invite')).toBe(false);
+    await busy.stop();
+  });
 });
