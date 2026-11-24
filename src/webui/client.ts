@@ -376,13 +376,16 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       : state.game === 'holdem' ? `${T.gamePicker.holdemTitle} · ${T.holdem.blindsLabel(state.blinds?.sb ?? 0, state.blinds?.bb ?? 0)}`
         : T.roleText.noGame;
   topbar.append(el('span', 'casino-round', `${gameLabel}${state.game === 'holdem' ? '' : ` · ${softLabel}`}`));
-  const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? T.rulesClose : T.rulesBtn);
-  rulesBtn.type = 'button';
-  rulesBtn.addEventListener('click', () => {
-    ui.rulesOpen = !ui.rulesOpen;
-    if (current) render(ctx, current);
-  }, { signal: ctx.signal });
-  topbar.append(rulesBtn);
+  // 「规则说明」只在对局中提供——大厅还没有游戏,规则无从谈起,不占右上角。
+  if (state.game !== null) {
+    const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? T.rulesClose : T.rulesBtn);
+    rulesBtn.type = 'button';
+    rulesBtn.addEventListener('click', () => {
+      ui.rulesOpen = !ui.rulesOpen;
+      if (current) render(ctx, current);
+    }, { signal: ctx.signal });
+    topbar.append(rulesBtn);
+  }
   wrap.append(topbar);
 
   // ── 空桌:游戏大厅(可滚动列表 + 搜索;以后新玩法往列表里加卡即可) ──
@@ -1085,7 +1088,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     wrap.append(matchBox);
   }
 
-  // ── 规则浮层 ──
+  // ── 规则浮层(仅对局中;回大厅即收起) ──
+  if (state.game === null) ui.rulesOpen = false;
   if (ui.rulesOpen) wrap.append(buildRules(ctx, T, state.game));
 
   // ── 错误条 ──
