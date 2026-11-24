@@ -2,7 +2,7 @@
   "name": "cortico-world-casino",
   "version": "0.7.0",
   "type": "module",
-  "description": "月下牌桌:一张就在电脑里的牌桌,和你的 AI 同桌对打——21 点(选庄、下注、要牌、分牌、保险、投降)、抽鬼牌(藏一张、点选抽牌、终局亮牌)与两人德州扑克(盲注轮转、四街限注、摊牌比牌)三个游戏,绿呢桌面实时显示牌局;筹码是游戏内数字,不涉及真钱。",
+  "description": "月下牌桌:一张就在你电脑里的绿呢牌桌,你的 AI 不是念稿人,而是真正的牌搭子——通过工具与事件实时看牌、下注、打心理战。三个游戏:21 点(选庄开局,分牌/保险/投降一应俱全)、抽鬼牌(开局藏一张、点选抽牌、终局揭晓的心理战)、两人德州扑克(庄位轮转、限注单挑、摊牌比牌)。筹码按游戏分开记账,破产可领救济;中途退出自动挂起,回来从原局接着打;终局当场「再来一局」,胜场逐局累计。可搜索的游戏大厅、发牌与翻牌动画、按面额叠起的筹码堆;打开「AI 主动邀约」,它还会主动开口约你来一局。筹码是游戏内数字,不涉真钱——输赢都留在牌桌上。",
   "license": "MIT",
   "homepage": "https://github.com/Flerish/cortico-world-casino#readme",
   "repository": {
@@ -35,7 +35,7 @@
     "locales": {
       "en": {
         "displayName": "Moonlit Table",
-        "description": "A card table inside your computer shared with your AI: blackjack (pick the dealer, bet, hit, split, insure, surrender), Old Maid (one card hidden, click a face-down card to draw, reveal at the end) and heads-up Texas Hold'em (rotating blinds, capped-limit streets, showdown) on one felt table that shows the game live; chips are game numbers only."
+        "description": "Moonlit Table: a green-felt card table right inside your computer where your AI is not a narrator but a real card partner — it reads the table, bets and bluffs through live tools and events. Three games: Blackjack (pick your dealer; split, insurance and surrender built in), Old Maid (one card hidden at the deal; a mind game revealed at the end) and heads-up Texas Hold'em (rotating button, capped-limit streets, real showdowns). Chips are tracked per game; take relief when broke; leave any time and resume exactly where you left off; play again right at the table with the running score carried over. A searchable game lobby, deal and flip animations, stacks of chips piled on the felt — and with AI invitations enabled, it will even ask YOU for a game. Chips are in-game numbers only: no real money, wins and losses stay on the table."
       }
     },
     "tags": [
