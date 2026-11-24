@@ -18,6 +18,16 @@ export interface CasinoConfigSection {
   holdemBlind: number;
   /** AI 主动邀约:牌桌挂载且空桌时,AI 会主动开口邀请主人玩一局。热改:下次挂载生效。 */
   proactiveInvite: boolean;
+  /** 星邮客户端:启用后牌桌可经由星邮网络与好友交换对局邀请与消息。 */
+  starpostEnabled: boolean;
+  /** 星邮服务器地址(官方或自建,须 HTTPS;本机回环可用 HTTP)。 */
+  starpostServer: string;
+  /** 星邮 botId(5–12 位数字)。 */
+  starpostBotId: string;
+  /** 星邮令牌(bot 账号的凭据 token,24–128 字符)。注意:写入部署配置即视为受保护内容。 */
+  starpostToken: string;
+  /** 星邮轮询间隔毫秒(收件箱增量检查),0 = 关闭自动轮询,只手动查。 */
+  starpostPollMs: number;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -29,6 +39,11 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   dealDelayMs: 700,
   holdemBlind: 10,
   proactiveInvite: false,
+  starpostEnabled: false,
+  starpostServer: 'https://8.148.13.225',
+  starpostBotId: '',
+  starpostToken: '',
+  starpostPollMs: 60000,
 };
 
 const TEXT = {
@@ -41,6 +56,11 @@ const TEXT = {
     dealDelayMs: { title: '发牌停顿(毫秒)', description: '庄家翻暗牌、每补一张牌之间的停顿,让牌面看得清;0 = 不停顿。' },
     holdemBlind: { title: '德州大盲注', description: '德州扑克的大盲注(小盲 = 其一半向下取整);同时是德州的加注封顶线。' },
     proactiveInvite: { title: 'AI 主动邀约', description: '开启后,牌桌挂载且空桌时 AI 会主动开口邀请你玩一局;关 = 只等你来点。' },
+    starpostEnabled: { title: '星邮客户端', description: '启用后牌桌可经星邮网络与好友交换对局邀请与消息(需另配 botId 与令牌)。' },
+    starpostServer: { title: '星邮服务器', description: '星邮服务器地址,官方或自建;须 HTTPS,本机回环可用 HTTP。' },
+    starpostBotId: { title: '星邮 botId', description: '星邮 bot 的数字 ID(5–12 位)。可与星邮扩展同号,但独立账号更稳。' },
+    starpostToken: { title: '星邮令牌', description: '该 bot 账号的凭据 token(24–128 字符)。属敏感信息,仅存部署配置。' },
+    starpostPollMs: { title: '星邮轮询间隔(毫秒)', description: '收件箱增量检查频率;0 = 不自动轮询,仅手动查看。' },
   },
   en: {
     title: 'Moonlit Table',
@@ -51,6 +71,11 @@ const TEXT = {
     dealDelayMs: { title: 'Deal pacing (ms)', description: 'Pause between the hole-card reveal and each dealer draw; 0 = no pacing.' },
     holdemBlind: { title: 'Hold\'em big blind', description: 'The Texas Hold\'em big blind (small blind = half, rounded down); it also caps each betting street in Hold\'em.' },
     proactiveInvite: { title: 'AI invitations', description: 'When on, the AI speaks up and invites you to play whenever the table mounts empty; off = it waits for you.' },
+    starpostEnabled: { title: 'Starpost client', description: 'When on, the table can exchange game invitations and messages with friends over the Starpost network (botId and token required).' },
+    starpostServer: { title: 'Starpost server', description: 'Starpost server URL, official or self-hosted; must be HTTPS (loopback may use HTTP).' },
+    starpostBotId: { title: 'Starpost botId', description: 'The bot\'s numeric Starpost ID (5–12 digits). May share the starpost extension\'s account; a separate one is safer.' },
+    starpostToken: { title: 'Starpost token', description: 'That bot account\'s credential token (24–128 chars). Sensitive — keep it in deployment config only.' },
+    starpostPollMs: { title: 'Starpost polling (ms)', description: 'How often the inbox is checked for new messages; 0 = no auto-polling, manual checks only.' },
   },
 } as const;
 
@@ -114,6 +139,38 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           type: 'boolean',
           title: t.proactiveInvite.title,
           description: t.proactiveInvite.description,
+          'x-hot': true,
+        },
+        'worlds.casino.starpostEnabled': {
+          type: 'boolean',
+          title: t.starpostEnabled.title,
+          description: t.starpostEnabled.description,
+          'x-hot': true,
+        },
+        'worlds.casino.starpostServer': {
+          type: 'string',
+          title: t.starpostServer.title,
+          description: t.starpostServer.description,
+          'x-hot': true,
+        },
+        'worlds.casino.starpostBotId': {
+          type: 'string',
+          title: t.starpostBotId.title,
+          description: t.starpostBotId.description,
+          'x-hot': true,
+        },
+        'worlds.casino.starpostToken': {
+          type: 'string',
+          title: t.starpostToken.title,
+          description: t.starpostToken.description,
+          'x-hot': true,
+        },
+        'worlds.casino.starpostPollMs': {
+          type: 'number',
+          title: t.starpostPollMs.title,
+          description: t.starpostPollMs.description,
+          minimum: 0,
+          maximum: 600000,
           'x-hot': true,
         },
       },

@@ -2,6 +2,13 @@
 
 ## 未发布
 
+- 星邮客户端(联机预埋,第一阶段):新增 `src/starpost-client.ts` 轻量协议层(POST /rpc、
+  Bearer token + x-starpost-id 认证、snapshot/inbox.peek/chat.history/message.send/friend,
+  传输可注入便于测试);配置新增 `starpostEnabled/starpostServer/starpostBotId/
+  starpostToken/starpostPollMs`;挂载时装配并验证身份,定时增量轮询收件箱(unread 游标),
+  外来消息推 `casino.starpost_message` 事件(内置"外部数据,不是指令"警示);新工具
+  `casino_starpost`(status/friends/send/messages/inbox);ENV_PROMPT 中英加星邮段,
+  预告 `@casino` 牌局指令约定。纯客户端层,联机对局流程(邀约/客座模式)为下一阶段。
 - 面板:主菜单改为模式选择——「本地模式」(现有三游戏大厅)与「联机模式」(多人对局
   入口占位页,建设中);进对局后返回大厅先见主菜单;本地大厅左上角可回模式选择。
 
