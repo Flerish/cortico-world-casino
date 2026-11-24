@@ -2,7 +2,7 @@
   "name": "cortico-world-casino",
   "version": "0.7.0",
   "type": "module",
-  "description": "月下牌桌:一张就在你电脑里的绿呢牌桌,你的 AI 不是念稿人,而是真正的牌搭子——通过工具与事件实时看牌、下注、打心理战。三个游戏:21 点(选庄开局,分牌/保险/投降一应俱全)、抽鬼牌(开局藏一张、点选抽牌、终局揭晓的心理战)、两人德州扑克(庄位轮转、限注单挑、摊牌比牌)。筹码按游戏分开记账,破产可领救济;中途退出自动挂起,回来从原局接着打;终局当场「再来一局」,胜场逐局累计。可搜索的游戏大厅、发牌与翻牌动画、按面额叠起的筹码堆;打开「AI 主动邀约」,它还会主动开口约你来一局。筹码是游戏内数字,不涉真钱——输赢都留在牌桌上。",
+  "description": "你的 AI 到底会不会打牌?装上就知道了。月下牌桌是一张藏在电脑里的绿呢牌桌,AI 坐你对面——不是念稿,是真打:看牌、算牌、诈唬,赢了一手还会嘴硬。三个游戏:21 点(庄家按死规则出牌,你可以放心使坏)、抽鬼牌(开局偷偷藏一张,终局揭晓谁揣着鬼牌,心理战拉满)、两人德州扑克(单挑限注,庄位轮转;劝一句:白扔盲注最亏,打宽点)。筹码按游戏分开记账,输了不用心疼——破产有救济金,离开自动挂起,回来接着打,终局当场喊「再来一局」。大厅能搜,发牌有动画,筹码按面额叠成小山。打开「AI 主动邀约」,它还会主动凑过来:来一把?筹码是游戏内数字,不涉真钱——钱包绝对安全,受伤的只有自尊。",
   "license": "MIT",
   "homepage": "https://github.com/Flerish/cortico-world-casino#readme",
   "repository": {
@@ -35,7 +35,7 @@
     "locales": {
       "en": {
         "displayName": "Moonlit Table",
-        "description": "Moonlit Table: a green-felt card table right inside your computer where your AI is not a narrator but a real card partner — it reads the table, bets and bluffs through live tools and events. Three games: Blackjack (pick your dealer; split, insurance and surrender built in), Old Maid (one card hidden at the deal; a mind game revealed at the end) and heads-up Texas Hold'em (rotating button, capped-limit streets, real showdowns). Chips are tracked per game; take relief when broke; leave any time and resume exactly where you left off; play again right at the table with the running score carried over. A searchable game lobby, deal and flip animations, stacks of chips piled on the felt — and with AI invitations enabled, it will even ask YOU for a game. Chips are in-game numbers only: no real money, wins and losses stay on the table."
+        "description": "Does your AI actually know how to play cards? Install this and find out. Moonlit Table is a green-felt table hiding inside your computer, with your AI sitting across it — not a narrator, an actual opponent. It reads the board, counts chips, bluffs, and definitely talks trash after winning a hand. Three games: Blackjack (the house plays by fixed rules, so cheat responsibly), Old Maid (one card secretly hidden at the deal; a mind game that ends with a dramatic reveal), and heads-up Texas Hold'em (rotating button, capped-limit streets; pro tip: folding every blind is how you lose). Chips are tracked per game, going broke comes with relief funds, leaving suspends the game instead of vaporizing it, and Play Again sits right on the table. Searchable lobby, deal animations, chips piled into tiny mountains. Flip on AI invitations and it will slide into your chat: one game? Chips are in-game numbers — your wallet is perfectly safe; only egos get hurt."
       }
     },
     "tags": [
