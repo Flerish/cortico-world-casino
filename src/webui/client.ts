@@ -770,8 +770,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       const isBet = he.currentBet === 0;
       const myAvail = Math.max(0, state.player.chips - he.playerCommitted);
       const minTo = isBet ? he.blinds.bb : he.currentBet + he.minRaise;
-      const maxTo = Math.min(he.streetCap, he.playerCommitted + myAvail);
+      const allinTarget = he.playerCommitted + myAvail;
+      const maxTo = Math.min(he.streetCap, allinTarget);
       const canFullRaise = maxTo >= minTo;
+      // 常规最小加注超过单街封顶时,若不足额全押仍高于现注,只剩"全押"这一个合法加注目标;
+      // 对方已全押时任何加注都非法,构建器整个隐藏。
+      const allinOnly = !canFullRaise && !he.aiAllIn && allinTarget > (isBet ? 0 : he.currentBet);
       const row = el('div', 'btnrow');
       const foldBtn = el('button', 'danger', T.holdem.fold);
       foldBtn.type = 'button';
@@ -789,9 +793,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         row.append(call);
       }
       wrap.append(row);
-      // 下注/加注构建器:筹码累加,目标额 = 本街投入到的总额
-      if (canFullRaise || myAvail > toCall) {
-        ui.bet = Math.min(Math.max(ui.bet, minTo), maxTo);
+      // 下注/加注构建器:筹码累加,目标额 = 本街投入到的总额;allinOnly 时锁定为全押额。
+      if (canFullRaise || allinOnly) {
+        ui.bet = canFullRaise ? Math.min(Math.max(ui.bet, minTo), maxTo) : maxTo;
         const build = el('div', 'betbuild');
         const view = el('span', 'betview', isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet));
         const clear = el('button', undefined, T.clear);
@@ -800,8 +804,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         go.type = 'button';
         const sync = (): void => {
           view.textContent = isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet);
-          clear.disabled = ui.bet <= minTo;
-          go.disabled = ui.bet < minTo || ui.bet > maxTo;
+          clear.disabled = canFullRaise ? ui.bet <= minTo : true;
+          go.disabled = canFullRaise ? (ui.bet < minTo || ui.bet > maxTo) : ui.bet !== maxTo;
         };
         const add = (n: number): void => {
           ui.bet = Math.min(maxTo, ui.bet + n);
@@ -817,7 +821,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           ui.bet = maxTo;
           sync();
         }, { signal: ctx.signal });
-        build.append(allin, view, el('span', 'casino-idle', `${T.holdem.minRaiseIs(minTo)}`));
+        build.append(allin, view, el('span', 'casino-idle', canFullRaise ? T.holdem.minRaiseIs(minTo) : T.holdem.allinOnlyHint(maxTo)));
         wrap.append(build);
         clear.addEventListener('click', () => {
           ui.bet = minTo;

@@ -194,6 +194,14 @@ const zh = {
     `德州第 ${round} 手开始:盲注 ${sb}/${bb},庄位(小盲)在${buttonLabel}。`,
   holdemTurnNotify: (round: number, phase: string, pot: number, toCall: number, minTo: number) =>
     `轮到你在德州扑克行动(第 ${round} 手,${phase}):底池 ${pot},要跟 ${toCall},最小加注到 ${minTo}。先用 casino_table 看你的底牌与牌面,再用 holdem_act 行动(fold / check / call / bet / raise;bet、raise 必须带 amount:bet 是下注额,raise 是本街投入到的总额)。`,
+  holdemTurnNotifyRaiseClosed: (round: number, phase: string, pot: number, toCall: number, cap: number) =>
+    `轮到你在德州扑克行动(第 ${round} 手,${phase}):底池 ${pot},要跟 ${toCall};本街注额已达封顶 ${cap},不能常规加注,只能跟注或弃牌(筹码不足时全押跟注即可)。先用 casino_table 看你的底牌与牌面,再用 holdem_act 行动(fold / check / call)。`,
+  holdemTurnNotifyAllinOnly: (round: number, phase: string, pot: number, toCall: number, allinTo: number) =>
+    `轮到你在德州扑克行动(第 ${round} 手,${phase}):底池 ${pot},要跟 ${toCall};常规加注的最小额度已超过单街封顶,要加注只能不足额全押到 ${allinTo},否则只能跟注或弃牌。先用 casino_table 看你的底牌与牌面,再用 holdem_act 行动(fold / check / call / raise 到 ${allinTo} 即全押)。`,
+  holdemTurnNotifyFaceAllin: (round: number, phase: string, pot: number, toCall: number) =>
+    `轮到你在德州扑克行动(第 ${round} 手,${phase}):底池 ${pot},要跟 ${toCall};对方已全押,只能跟注或弃牌。先用 casino_table 看你的底牌与牌面,再用 holdem_act 行动(fold / call)。`,
+  holdemRaiseCapClosed: (cap: number) =>
+    `本街注额已达封顶 ${cap},不能常规加注;只能跟注、弃牌,或不足额全押(raise 到你的全部余额)。`,
   holdemActReceipt: (actionText: string, cards: string, community: string, pot: string, next: string) =>
     `你${actionText} 你的底牌:${cards}。公共牌:${community}。${pot}${next}`,
   holdemNextYouAct: '接下来还是你行动,用 holdem_act 继续。',
@@ -402,6 +410,14 @@ const en: ModelText = {
     `Hold'em hand ${round} begins: blinds ${sb}/${bb}, the button (small blind) is with ${buttonLabel}.`,
   holdemTurnNotify: (round, phase, pot, toCall, minTo) =>
     `Your turn to act in Hold'em (hand ${round}, ${phase}): pot ${pot}, to call ${toCall}, minimum raise to ${minTo}. Check casino_table for your hole cards and the board first, then act with holdem_act (fold / check / call / bet / raise; bet and raise take amount: for bet it is the stake, for raise it is the street total to raise to).`,
+  holdemTurnNotifyRaiseClosed: (round, phase, pot, toCall, cap) =>
+    `Your turn to act in Hold'em (hand ${round}, ${phase}): pot ${pot}, to call ${toCall}; this street has reached the cap of ${cap}, so no regular raise is possible — call or fold (a short all-in call is fine if short-stacked). Check casino_table for your hole cards first, then act with holdem_act (fold / check / call).`,
+  holdemTurnNotifyAllinOnly: (round, phase, pot, toCall, allinTo) =>
+    `Your turn to act in Hold'em (hand ${round}, ${phase}): pot ${pot}, to call ${toCall}; the minimum regular raise exceeds the street cap, so raising is only possible as a short all-in to ${allinTo} — otherwise call or fold. Check casino_table for your hole cards first, then act with holdem_act (fold / check / call, or raise to ${allinTo} to shove).`,
+  holdemTurnNotifyFaceAllin: (round, phase, pot, toCall) =>
+    `Your turn to act in Hold'em (hand ${round}, ${phase}): pot ${pot}, to call ${toCall}; the opponent is all-in, so only call or fold. Check casino_table for your hole cards first, then act with holdem_act (fold / call).`,
+  holdemRaiseCapClosed: (cap) =>
+    `This street has reached the cap of ${cap}; no regular raise. Call, fold, or shove by raising to your full remaining stack.`,
   holdemActReceipt: (actionText, cards, community, pot, next) =>
     `You ${actionText} Your hole cards: ${cards}. Board: ${community}. ${pot}${next}`,
   holdemNextYouAct: 'You act again; continue with holdem_act.',

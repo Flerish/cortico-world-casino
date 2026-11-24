@@ -908,6 +908,23 @@ export class CasinoWorld implements World {
     return seatState.chips - seat.committed;
   }
 
+  /**
+   * 已成交底池(展示口径):不含未跟注的注额。高出低出的部分只有在高侧自愿下注过
+   * 或低侧已无法跟(全押)时才算"未跟注";纯盲注阶段(双方都没行动过)整副盲注计入,
+   * 与常见牌房的显示一致。
+   */
+  private holdemMatchedPot(): number {
+    const h = this.state!.holdem!;
+    const total = h.ai.committed + h.player.committed;
+    const high = Math.max(h.ai.street, h.player.street);
+    const low = Math.min(h.ai.street, h.player.street);
+    const owed = high - low;
+    if (owed <= 0) return total;
+    const highSide = h.ai.street >= h.player.street ? h.ai : h.player;
+    const lowSide = highSide === h.ai ? h.player : h.ai;
+    return total - ((highSide.acted || lowSide.allIn) ? owed : 0);
+  }
+
   private toolHoldemAct(args: Record<string, unknown>): Promise<string> {
     const mt = this.mt();
     const state = this.state!;
@@ -1018,20 +1035,32 @@ export class CasinoWorld implements World {
     if (h.toAct === 'ai') this.notifyHoldemTurn();
   }
 
-  /** 轮到 AI 行动:flush 通知(先 casino_table 看牌,再 holdem_act)。 */
+  /** 轮到 AI 行动:flush 通知(先 casino_table 看牌,再 holdem_act)。加注可行性按封顶如实说明。 */
   private notifyHoldemTurn(): void {
     const mt = this.mt();
     const h = this.state!.holdem!;
-    const pot = h.ai.committed + h.player.committed;
+    const pot = this.holdemMatchedPot();
     const toCall = Math.max(0, h.currentBet - h.ai.street);
+    const cap = this.opts.cfg.maxBet;
+    const phaseName = mt.holdemPhaseName[h.phase] ?? '';
+    const other: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
+    const otherSeat = other === 'ai' ? h.ai : h.player;
     const minTo = h.currentBet > 0 ? h.currentBet + h.minRaise : this.holdemBlinds().bb;
+    const allinTo = h.ai.street + this.holdemAvail(h.ai, 'ai');
+    const text = otherSeat.allIn
+      ? mt.holdemTurnNotifyFaceAllin(h.round, phaseName, pot, toCall)
+      : minTo <= cap
+        ? mt.holdemTurnNotify(h.round, phaseName, pot, toCall, minTo)
+        : allinTo > h.currentBet && allinTo <= cap
+          ? mt.holdemTurnNotifyAllinOnly(h.round, phaseName, pot, toCall, allinTo)
+          : mt.holdemTurnNotifyRaiseClosed(h.round, phaseName, pot, toCall, cap);
     void this.host?.pushEvent({
       type: 'holdem.turn',
       ts: nowIso(this.opts.timezone),
       source: this.id,
       origin: 'internal',
       senderKey: this.id,
-      text: mt.holdemTurnNotify(h.round, mt.holdemPhaseName[h.phase] ?? '', pot, toCall, minTo),
+      text,
     }, { trigger: 'flush' });
   }
 
@@ -1125,7 +1154,10 @@ export class CasinoWorld implements World {
       if (target > cap) return { ok: false, text: mt.holdemBetOverCap(cap) };
       if (target > seat.street + avail) return { ok: false, text: mt.holdemBetOverBalance(avail) };
       const shortAllIn = target === seat.street + avail && avail < minTo - seat.street;
-      if (target < minTo && !shortAllIn) return { ok: false, text: mt.holdemRaiseTooSmall(minTo) };
+      if (target < minTo && !shortAllIn) {
+        // 常规最小加注超过单街封顶时,本街已无法常规加注(只剩跟注/弃牌/不足额全押),如实告知。
+        return { ok: false, text: minTo > cap ? mt.holdemRaiseCapClosed(cap) : mt.holdemRaiseTooSmall(minTo) };
+      }
       if (target <= h.currentBet) return { ok: false, text: mt.holdemRaiseTooSmall(minTo) };
       const allin = commit(target - seat.street);
       h.minRaise = Math.max(h.minRaise, target - h.currentBet);
@@ -1145,7 +1177,7 @@ export class CasinoWorld implements World {
       actionText,
       this.cards(h.ai.cards),
       h.community.length ? this.cards(h.community) : mt.holdemCommunityEmpty.replace(/[。.]$/, ''),
-      mt.holdemPotNote(h.ai.committed + h.player.committed),
+      mt.holdemPotNote(this.holdemMatchedPot()),
       '',
     );
   }
@@ -1268,25 +1300,23 @@ export class CasinoWorld implements World {
     const state = this.state!;
     const h = state.holdem;
     if (!h) return mt.returnedToLobby;
-    const pot = h.ai.committed + h.player.committed;
+    // 划转只动"已成交"部分:双方投入不等(短筹码全押)时,高出的部分从未被跟、本来就没动账,
+    // 自然留在原主——因此赢家净得 = min(双方投入);平分时双方各收回自己的成交额,净 0
+    // (两人桌成交池必为偶数,不存在奇数筹码问题)。归档底池同样按成交口径记录。
+    const pot = 2 * Math.min(h.ai.committed, h.player.committed);
+    const m = Math.min(h.ai.committed, h.player.committed);
     const nextButton: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
     let deltaAi: number;
     let deltaPlayer: number;
     if (winner === 'ai') {
-      deltaAi = h.player.committed;
-      deltaPlayer = -h.player.committed;
+      deltaAi = m;
+      deltaPlayer = -m;
     } else if (winner === 'player') {
-      deltaAi = -h.ai.committed;
-      deltaPlayer = h.ai.committed;
+      deltaAi = -m;
+      deltaPlayer = m;
     } else {
-      // 平分底池;奇数筹码归本手大盲(标准规则:奇数筹码归按钮左侧,单挑时即大盲)。
-      const half = Math.floor(pot / 2);
-      const odd = pot - half * 2;
-      const bbThisHand: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
-      const aiShare = bbThisHand === 'ai' ? half + odd : half;
-      const playerShare = bbThisHand === 'player' ? half + odd : half;
-      deltaAi = aiShare - h.ai.committed;
-      deltaPlayer = playerShare - h.player.committed;
+      deltaAi = 0;
+      deltaPlayer = 0;
     }
     state.ai.chips += deltaAi;
     state.ai.net += deltaAi;
@@ -1590,7 +1620,7 @@ export class CasinoWorld implements World {
         streetCap: this.opts.cfg.maxBet,
         currentBet: h.currentBet,
         minRaise: h.minRaise,
-        pot: h.ai.committed + h.player.committed,
+        pot: this.holdemMatchedPot(),
         community: formatHand(h.community),
         playerCards: formatHand(h.player.cards),
         aiCards: h.revealHole ? formatHand(h.ai.cards) : null,

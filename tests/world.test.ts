@@ -600,10 +600,10 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await world.stop();
   });
 
-  it('德州:双方短筹码盲注全押,公共牌最大牌双方同牌,平分底池且奇数筹码归本手大盲', async () => {
+  it('德州:双方短筹码盲注全押,公共牌最大牌双方同牌,平分底池(未跟注部分留在原主)', async () => {
     // 牌靴:发牌序(庄位=玩家=小盲):玩家 ♦4 ♣5,AI ♥2 ♦3;公共牌 ♠A ♥K ♦Q ♣J ♥10。
-    // 双方都只能用公共牌的 A-K-Q-J-10 顺子 → 平分。底池 = 5(玩家小盲全押) + 8(AI 大盲全押) = 13,
-    // 一半 6 余 1:本手大盲是 AI,奇数筹码归 AI → AI 得 7、玩家得 6。
+    // 双方都只能用公共牌的 A-K-Q-J-10 顺子 → 平分。玩家小盲全押 5,AI 大盲全押 8:
+    // AI 多出的 3 无人能跟,留在原主;成交池 = 2×5 = 10,平分双方净 0 → 筹码 8/5 不变。
     const used: Card[] = [
       card(4, 2), card(2, 1), card(5, 3), card(3, 2),
       card(1, 0), card(13, 1), card(12, 2), card(11, 3), card(10, 1),
@@ -620,9 +620,69 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await act(world, 'deal'); // 双方盲注阶段即全押,自动发完公共牌摊牌
     const snap = await omState(world);
     expect(snap.winner).toBe('split');
-    expect(snap.lastHoldem!.pot).toBe(13);
-    expect(snap.ai.chips).toBe(7);
-    expect(snap.player.chips).toBe(6);
+    expect(snap.lastHoldem!.pot).toBe(10);
+    expect(snap.ai.chips).toBe(8);
+    expect(snap.player.chips).toBe(5);
+    await world.stop();
+  });
+
+  it('德州:单街封顶后不能常规加注(报错如实说明),底池只显示已成交部分', async () => {
+    rigTable({ game: 'holdem' }); // 默认 1000/1000,庄位=玩家
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'deal');
+    // 翻牌前:玩家直接加注到封顶 200,AI 跟注 → 翻牌。
+    await act(world, 'raise', { amount: 200 });
+    await tool(world, 'holdem_act', { action: 'call' });
+    let snap = await omState(world);
+    expect(snap.phase).toBe('flop');
+    expect(snap.pot).toBe(400);
+    // 翻牌:AI 过牌(非庄位先手),玩家下注 200(封顶)。
+    await tool(world, 'holdem_act', { action: 'check' });
+    snap = await omState(world);
+    expect(snap.toAct).toBe('player');
+    await act(world, 'bet', { amount: 200 });
+    snap = await omState(world);
+    // 总投入 600,其中 200 未跟注 → 底池显示 400(未跟注部分不进已成交池)。
+    expect(snap.pot).toBe(400);
+    expect(snap.currentBet).toBe(200);
+    // 封顶死局:常规加注非法(最小加注 400 > 封顶 200),面板动作被拒。
+    await expect(act(world, 'raise', { amount: 300 })).rejects.toThrow();
+    await expect(act(world, 'raise', { amount: 400 })).rejects.toThrow();
+    // AI 只能跟注 → 转牌,底池 800(四笔 200 全部成交),现注清零。
+    await tool(world, 'holdem_act', { action: 'call' });
+    snap = await omState(world);
+    expect(snap.phase).toBe('turn');
+    expect(snap.currentBet).toBe(0);
+    expect(snap.pot).toBe(800);
+    await world.stop();
+  });
+
+  it('德州:全押跟注不足额时,赢家只净得已成交部分,未跟注超出部分留在下注方', async () => {
+    // 玩家(庄位)320 筹码,翻牌前加注到封顶 200;AI 只有 120,全押跟注不足额(成交 120)。
+    // 牌:AI ♠A ♠K,玩家 ♥2 ♦3,公共牌 ♠Q ♠J ♠9 ♦5 ♣4 → AI 黑桃同花胜。
+    // 成交池 = 2×120 = 240:AI +120(120→240),玩家 -120(320→200);玩家未跟的 80 不动。
+    const used: Card[] = [
+      card(2, 1), card(1, 0), card(3, 2), card(13, 0),
+      card(12, 0), card(11, 0), card(9, 0), card(5, 2), card(4, 3),
+    ];
+    const rest: Card[] = [];
+    for (let suit = 0; suit < 4; suit++) {
+      for (let rank = 1; rank <= 13; rank++) {
+        if (!used.some((c) => c.rank === rank && c.suit === suit)) rest.push(card(rank, suit));
+      }
+    }
+    rigTable({ game: 'holdem', shoe: [...used, ...rest], aiChips: 120, playerChips: 320 });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'deal');
+    await act(world, 'raise', { amount: 200 }); // 玩家加注到封顶
+    await tool(world, 'holdem_act', { action: 'call' }); // AI 全押跟注(不足额,110 补到 120)
+    const snap = await omState(world);
+    expect(snap.winner).toBe('ai');
+    expect(snap.lastHoldem!.pot).toBe(240);
+    expect(snap.ai.chips).toBe(240);
+    expect(snap.player.chips).toBe(200);
     await world.stop();
   });
 
