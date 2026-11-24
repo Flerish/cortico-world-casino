@@ -11,6 +11,8 @@ import type { ToolCallContext, ToolDef, World, WorldHost, WorldStreamSocket, Wor
 import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import {
+  bestPokerHand,
+  comparePokerHands,
   dealerShouldHit,
   extractPairs,
   formatCard,
@@ -29,19 +31,30 @@ import {
   loadTable,
   newSeat,
   newBlackjackState,
+  newHoldemSeat,
+  newHoldemState,
   newOldMaidState,
   newTable,
   recordHand,
+  recordHoldem,
   recordOldMaid,
   saveTable,
   type BlackjackState,
   type HandRecord,
+  type HoldemRecord,
+  type HoldemSeat,
+  type HoldemState,
   type IdlerHand,
   type OldMaidRecord,
   type Outcome,
   type SeatState,
   type TableState,
 } from './table.ts';
+
+/** 德州点数的显示名(A 记 14 的显示仍是 A)。 */
+function pokerRankLabel(r: number): string {
+  return r === 14 ? 'A' : r === 13 ? 'K' : r === 12 ? 'Q' : r === 11 ? 'J' : String(r);
+}
 
 const ENV_PROMPT_FILES: Record<'zh' | 'en', string> = {
   zh: fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url)),
@@ -132,6 +145,21 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       properties: {},
     },
   },
+  {
+    name: 'holdem_act',
+    description:
+      "Act in a Texas Hold'em hand when it is your turn: fold, check, call, bet or raise. For bet, amount is the stake; for raise, amount is the street total to raise to. The receipt echoes the board and the pot.",
+    tags: ['act'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['fold', 'check', 'call', 'bet', 'raise'], description: 'The action to take.' },
+        amount: { type: 'number', description: 'For bet: the stake. For raise: the street total to raise to.' },
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 export class CasinoWorld implements World {
@@ -155,6 +183,7 @@ export class CasinoWorld implements World {
       'casino.startChips': String(this.opts.cfg.startChips),
       'casino.minBet': String(this.opts.cfg.minBet),
       'casino.maxBet': String(this.opts.cfg.maxBet),
+      'casino.holdemBlind': String(this.opts.cfg.holdemBlind),
     };
   }
 
@@ -173,8 +202,8 @@ export class CasinoWorld implements World {
           id: 'table',
           title: language === 'en' ? 'Moonlit Table' : '月下牌桌',
           description: language === 'en'
-            ? 'Two games against your AI on the green felt: standard blackjack and Old Maid.'
-            : '与 AI 同桌的绿呢牌桌:标准 21 点与抽鬼牌,两个游戏。',
+            ? 'Three games against your AI on the green felt: standard blackjack, Old Maid and heads-up Texas Hold\'em.'
+            : '与 AI 同桌的绿呢牌桌:标准 21 点、抽鬼牌与两人德州扑克,三个游戏。',
           getMethods: ['state', 'history'],
         },
       ],
@@ -194,6 +223,7 @@ export class CasinoWorld implements World {
             { name: 'casino.startChips', description: language === 'en' ? 'The configured starting chips, right now.' : '配置里的起始筹码,此刻的值。' },
             { name: 'casino.minBet', description: language === 'en' ? 'The configured minimum bet, right now.' : '配置里的最小下注,此刻的值。' },
             { name: 'casino.maxBet', description: language === 'en' ? 'The configured maximum bet per hand, right now.' : '配置里的单手最大下注,此刻的值。' },
+            { name: 'casino.holdemBlind', description: language === 'en' ? 'The Hold\'em big blind, right now.' : '德州扑克的大盲注,此刻的值。' },
           ],
         },
       ],
@@ -216,6 +246,15 @@ export class CasinoWorld implements World {
       // 进程在 AI 抽牌回合重启:继续 AI 的回合。
       await this.aiDrawsCard();
     }
+    if (this.state.game === 'holdem' && this.state.holdem) {
+      // 进程在德州发牌/摊牌途中重启:把发牌打完;停在 AI 行动回合则叫它。
+      const h = this.state.holdem;
+      if (h.phase === 'runout') {
+        await this.holdemRunout();
+      } else if (!h.winner && h.phase !== 'idle' && h.toAct === 'ai') {
+        this.notifyHoldemTurn();
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -233,6 +272,7 @@ export class CasinoWorld implements World {
     if (name === 'casino_player') return this.toolPlayer(args);
     if (name === 'casino_bank') return this.toolBank(args);
     if (name === 'oldmaid_draw') return await this.toolOldMaidDraw();
+    if (name === 'holdem_act') return await this.toolHoldemAct(args);
     return `Unknown tool ${name}.`;
   }
 
@@ -264,6 +304,12 @@ export class CasinoWorld implements World {
         );
         out.push(mt.oldMaidHistoryTitle(lines.length), ...lines);
       }
+      if (state.holdem && state.holdem.history.length) {
+        const lines = state.holdem.history.slice(0, limit).map((r, i) =>
+          mt.holdemHistoryLine(i + 1, r.round, r.winner === 'ai' ? mt.matchYouWin : r.winner === 'player' ? mt.matchOwnerWins : mt.matchTie, r.by, r.pot, `${r.delta >= 0 ? '+' : ''}${r.delta}`),
+        );
+        out.push(mt.holdemHistoryTitle(lines.length), ...lines);
+      }
       return out.length ? out.join('\n') : mt.noHistoryYet;
     }
     if (state.game === null) {
@@ -272,7 +318,10 @@ export class CasinoWorld implements World {
     if (state.game === 'blackjack') {
       return this.toolBlackjackStatus(mt, state.blackjack!);
     }
-    return this.toolOldMaidStatus(mt, state.oldmaid!);
+    if (state.game === 'oldmaid') {
+      return this.toolOldMaidStatus(mt, state.oldmaid!);
+    }
+    return this.toolHoldemStatus(mt, state.holdem!);
   }
 
   private toolBlackjackStatus(mt: ModelText, bj: BlackjackState): string {
@@ -845,6 +894,452 @@ export class CasinoWorld implements World {
     return line;
   }
 
+  // ---------------------------------------------------------------- 德州扑克对局
+
+  /** 德州盲注:小盲 = 大盲一半向下取整(至少 1)。 */
+  private holdemBlinds(): { sb: number; bb: number } {
+    const bb = Math.max(2, Math.floor(this.opts.cfg.holdemBlind));
+    return { sb: Math.max(1, Math.floor(bb / 2)), bb };
+  }
+
+  /** 一侧还能投入的筹码(结算模型:筹码没动账,投入占用自己的余额)。 */
+  private holdemAvail(seat: HoldemSeat, side: 'ai' | 'player'): number {
+    const seatState = side === 'ai' ? this.state!.ai : this.state!.player;
+    return seatState.chips - seat.committed;
+  }
+
+  private toolHoldemAct(args: Record<string, unknown>): Promise<string> {
+    const mt = this.mt();
+    const state = this.state!;
+    if (state.game !== 'holdem' || !state.holdem) return Promise.resolve(mt.noGameYet);
+    return this.holdemAction('ai', args).then((r) => r.text);
+  }
+
+  /** 德州状态(toolTable 的 holdem 分支):轮到谁、底池、底牌与公共牌。 */
+  private toolHoldemStatus(mt: ModelText, h: HoldemState): string {
+    const state = this.state!;
+    const pot = h.ai.committed + h.player.committed;
+    const { sb, bb } = this.holdemBlinds();
+    const buttonLabel = h.button === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner;
+    const phaseName = mt.holdemPhaseName[h.phase];
+    const turnText = h.winner
+      ? mt.holdemHandOver
+      : h.phase === 'idle'
+        ? mt.holdemDealFirst
+        : h.phase === 'runout'
+          ? mt.holdemDealing
+          : h.toAct === 'ai'
+            ? mt.holdemStatusTurnYou
+            : mt.holdemStatusTurnOwner;
+    const lines = [
+      `${mt.statusGameHoldem} ${h.round > 0 ? mt.holdemStatusHead(h.round, phaseName, buttonLabel, '') : ''} ${turnText}`.trim(),
+      mt.holdemStatusBlinds(sb, bb, this.opts.cfg.maxBet),
+    ];
+    if (h.round > 0 && !h.winner) {
+      const toCall = h.toAct === 'ai' ? h.currentBet - h.ai.street : 0;
+      const minTo = h.currentBet > 0 ? mt.holdemRaiseTooSmall(h.currentBet + h.minRaise).replace('加注至少到 ', '最小加注到 ') : mt.holdemBetTooSmall(bb).replace('下注至少 ', '最小下注 ');
+      lines.push(mt.holdemStatusPot(pot, h.ai.committed, h.player.committed, toCall, minTo));
+    }
+    if (h.ai.cards.length) lines.push(mt.holdemYourHole(this.cards(h.ai.cards)));
+    lines.push(h.community.length ? mt.holdemCommunity(this.cards(h.community)) : mt.holdemCommunityEmpty);
+    lines.push(h.revealHole && h.ai.cards.length ? mt.holdemOwnerHoleShown(this.cards(h.player.cards)) : h.player.cards.length ? mt.holdemOwnerHoleHidden(h.player.cards.length) : mt.holdemOwnerHoleHidden(2));
+    lines.push(mt.holdemStatusChips(state.ai.chips, state.player.chips));
+    return lines.join('\n');
+  }
+
+  /** 开一局德州(面板选卡):第一手庄位在{{owner}}那边,之后每手轮换;等主人点「发下一手」。 */
+  private startHoldem(): void {
+    const state = this.state!;
+    state.game = 'holdem';
+    state.holdem = newHoldemState('player');
+    this.save();
+    this.broadcast();
+  }
+
+  /** 发一手:全新 52 张、轮流发底牌、自动下盲注;盲注阶段就有人全押时直接发完摊牌。 */
+  private async dealHoldemHand(): Promise<void> {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.holdem!;
+    const { sb, bb } = this.holdemBlinds();
+    h.round++;
+    h.community = [];
+    h.ai = newHoldemSeat();
+    h.player = newHoldemSeat();
+    h.winner = null;
+    h.revealHole = false;
+    h.byFold = false;
+    h.currentBet = 0;
+    h.minRaise = bb;
+    h.toAct = null;
+    // 德州每手都用整副新牌:中途换靴会出现重复牌,绝不复用上一手的牌靴(测试 rig 走预写路径)。
+    if (!(state.drawn === 0 && state.shoe.length === 52 && h.round === 1)) {
+      state.shoe = shuffled(freshDeck(), this.opts.rng ?? Math.random);
+      state.drawn = 0;
+    }
+    const order: Array<'ai' | 'player'> = h.button === 'ai' ? ['ai', 'player', 'ai', 'player'] : ['player', 'ai', 'player', 'ai'];
+    for (const who of order) {
+      const seat = who === 'ai' ? h.ai : h.player;
+      seat.cards.push(this.draw());
+    }
+    const post = (side: 'ai' | 'player', blind: number): void => {
+      const seat = side === 'ai' ? h.ai : h.player;
+      const pay = Math.min(blind, this.holdemAvail(seat, side));
+      seat.committed += pay;
+      seat.street += pay;
+      if (this.holdemAvail(seat, side) === 0) seat.allIn = true;
+    };
+    const other: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
+    post(h.button, sb);
+    post(other, bb);
+    h.currentBet = Math.max(h.ai.street, h.player.street);
+    h.phase = 'preflop';
+    this.save();
+    this.broadcast();
+    const buttonLabel = h.button === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner;
+    const sbWho = h.button === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner;
+    const bbWho = other === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner;
+    void this.host?.pushEvent({
+      type: 'holdem.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: mt.holdemNewHand(h.round, sb, bb, buttonLabel) + ' ' + mt.holdemBlindsPosted(sb, sbWho, bb, bbWho, buttonLabel),
+    }, { trigger: 'flush' });
+    if (h.ai.allIn || h.player.allIn) {
+      // 盲注阶段就全押(极短筹码):没有可博弈的下注,直接发完公共牌摊牌。
+      await this.holdemRunout();
+      return;
+    }
+    h.toAct = h.button;
+    this.save();
+    this.broadcast();
+    if (h.toAct === 'ai') this.notifyHoldemTurn();
+  }
+
+  /** 轮到 AI 行动:flush 通知(先 casino_table 看牌,再 holdem_act)。 */
+  private notifyHoldemTurn(): void {
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    const pot = h.ai.committed + h.player.committed;
+    const toCall = Math.max(0, h.currentBet - h.ai.street);
+    const minTo = h.currentBet > 0 ? h.currentBet + h.minRaise : this.holdemBlinds().bb;
+    void this.host?.pushEvent({
+      type: 'holdem.turn',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: mt.holdemTurnNotify(h.round, mt.holdemPhaseName[h.phase] ?? '', pot, toCall, minTo),
+    }, { trigger: 'flush' });
+  }
+
+  /** {{owner}}在德州做了一个动作:flush 推给 AI,让它即时回应。 */
+  private notifyHoldemAction(text: string): void {
+    void this.host?.pushEvent({
+      type: 'holdem.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text,
+    }, { trigger: 'flush' });
+  }
+
+  /** 双方动作都汇到这里(AI 经 holdem_act,主人经面板)。 */
+  private async holdemAction(actor: 'ai' | 'player', args: Record<string, unknown>): Promise<OpResult> {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.holdem!;
+    if (h.winner) return { ok: false, text: mt.holdemHandOver };
+    if (h.phase === 'idle') return { ok: false, text: mt.holdemDealFirst };
+    if (h.phase === 'runout') return { ok: false, text: mt.holdemDealing };
+    if (h.toAct !== actor) return { ok: false, text: actor === 'ai' ? mt.holdemNotYourTurn : mt.holdemNotYourTurnOwner };
+    const other: 'ai' | 'player' = actor === 'ai' ? 'player' : 'ai';
+    const seat = actor === 'ai' ? h.ai : h.player;
+    const otherSeat = other === 'ai' ? h.ai : h.player;
+    const ownerLabel = actor === 'ai' ? mt.historyDealerYou : mt.historyDealerOwner;
+    const action = String(args.action ?? '');
+    const toCall = h.currentBet - seat.street;
+    const avail = this.holdemAvail(seat, actor);
+    const cap = this.opts.cfg.maxBet;
+    const { bb } = this.holdemBlinds();
+
+    const actText = (allin: boolean, suffix: string): string => {
+      const mark = allin ? mt.holdemAllInMark : '';
+      if (action === 'fold') return mt.holdemActionFold(ownerLabel) + suffix;
+      if (action === 'check') return mt.holdemActionCheck(ownerLabel) + suffix;
+      if (action === 'call') return mt.holdemActionCall(ownerLabel, Math.min(toCall, avail), mark) + suffix;
+      if (action === 'bet') return mt.holdemActionBet(ownerLabel, seat.street, mark) + suffix;
+      return mt.holdemActionRaise(ownerLabel, seat.street, mark) + suffix;
+    };
+    const commit = (pay: number): boolean => {
+      seat.street += pay;
+      seat.committed += pay;
+      const broke = this.holdemAvail(seat, actor) === 0;
+      if (broke) seat.allIn = true;
+      return broke;
+    };
+
+    if (action === 'fold') {
+      seat.folded = true;
+      const line = await this.holdemSettle(other, 'fold', '', '');
+      if (actor === 'player') this.notifyHoldemAction(mt.holdemActionFold(ownerLabel));
+      return { ok: true, text: actor === 'ai' ? line : line };
+    }
+    if (otherSeat.allIn && action !== 'call' && action !== 'fold') {
+      return { ok: false, text: mt.holdemFacingAllIn };
+    }
+    if (action === 'check') {
+      if (toCall > 0) return { ok: false, text: mt.holdemCannotCheck };
+      const suffix = await this.holdemAdvance(actor);
+      return { ok: true, text: this.holdemReceipt(actor, actText(false, suffix)) };
+    }
+    if (action === 'call') {
+      if (toCall <= 0) return { ok: false, text: mt.holdemNothingToCall };
+      const pay = Math.min(toCall, avail);
+      const allin = commit(pay);
+      const suffix = await this.holdemAdvance(actor);
+      return { ok: true, text: this.holdemReceipt(actor, actText(allin, suffix)) };
+    }
+    if (action === 'bet' || action === 'raise') {
+      if (action === 'raise' && h.currentBet === 0) return { ok: false, text: mt.holdemRaiseIsBet };
+      if (action === 'bet' && h.currentBet > 0) return { ok: false, text: mt.holdemRaiseIsBet };
+      const amount = Math.floor(Number(args.amount ?? NaN));
+      if (!Number.isFinite(amount)) return { ok: false, text: mt.holdemBetNotInteger(JSON.stringify(args.amount ?? null)) };
+      if (action === 'bet') {
+        if (amount < bb && amount < avail) return { ok: false, text: mt.holdemBetTooSmall(bb) };
+        if (amount > cap) return { ok: false, text: mt.holdemBetOverCap(cap) };
+        if (amount > avail) return { ok: false, text: mt.holdemBetOverBalance(avail) };
+        const allin = commit(amount);
+        h.currentBet = seat.street;
+        h.minRaise = Math.max(bb, amount);
+        const suffix = await this.holdemAdvance(actor);
+        return { ok: true, text: this.holdemReceipt(actor, actText(allin, suffix)) };
+      }
+      // raise:amount 是本街投入到的总额。
+      const target = amount;
+      const minTo = h.currentBet + h.minRaise;
+      const maxTo = Math.min(cap, seat.street + avail);
+      if (target > cap) return { ok: false, text: mt.holdemBetOverCap(cap) };
+      if (target > seat.street + avail) return { ok: false, text: mt.holdemBetOverBalance(avail) };
+      const shortAllIn = target === seat.street + avail && avail < minTo - seat.street;
+      if (target < minTo && !shortAllIn) return { ok: false, text: mt.holdemRaiseTooSmall(minTo) };
+      if (target <= h.currentBet) return { ok: false, text: mt.holdemRaiseTooSmall(minTo) };
+      const allin = commit(target - seat.street);
+      h.minRaise = Math.max(h.minRaise, target - h.currentBet);
+      h.currentBet = target;
+      const suffix = await this.holdemAdvance(actor);
+      return { ok: true, text: this.holdemReceipt(actor, actText(allin, suffix)) };
+    }
+    return { ok: false, text: mt.unknownAction(action, 'fold / check / call / bet / raise') };
+  }
+
+  /** AI 动作回执的公共尾:底牌、公共牌、底池与后续。 */
+  private holdemReceipt(actor: 'ai' | 'player', actionText: string): string {
+    if (actor !== 'ai') return actionText;
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    return mt.holdemActReceipt(
+      actionText,
+      this.cards(h.ai.cards),
+      h.community.length ? this.cards(h.community) : mt.holdemCommunityEmpty.replace(/[。.]$/, ''),
+      mt.holdemPotNote(h.ai.committed + h.player.committed),
+      '',
+    );
+  }
+
+  /**
+   * 一次行动后的推进:全押对局直接发完;街清则进下一街;否则轮到对方。
+   * 返回值是要追加到回执/通知后面的街道信息(空串 = 没有新街)。
+   */
+  private async holdemAdvance(actor: 'ai' | 'player'): Promise<string> {
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    const other: 'ai' | 'player' = actor === 'ai' ? 'player' : 'ai';
+    const seat = actor === 'ai' ? h.ai : h.player;
+    const otherSeat = other === 'ai' ? h.ai : h.player;
+    seat.acted = true;
+    this.save();
+    this.broadcast();
+
+    if (seat.allIn && !otherSeat.allIn && otherSeat.street < h.currentBet) {
+      // 对方还欠注:只能跟或弃。
+      h.toAct = other;
+      this.save();
+      this.broadcast();
+      if (other === 'ai') this.notifyHoldemTurn();
+      return '';
+    }
+    if (seat.allIn || otherSeat.allIn) {
+      // 已无下注可谈:发完公共牌摊牌。
+      return await this.holdemRunout();
+    }
+    const matched = h.ai.street === h.player.street;
+    if (matched && h.ai.acted && h.player.acted) {
+      return await this.holdemStreetDone();
+    }
+    h.toAct = other;
+    this.save();
+    this.broadcast();
+    if (other === 'ai') this.notifyHoldemTurn();
+    return '';
+  }
+
+  /** 本街结束:清街、翻下一街的牌(带停顿),河牌后摊牌。返回追加说明。 */
+  private async holdemStreetDone(): Promise<string> {
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    if (h.phase === 'river') return this.holdemShowdown();
+    h.ai.street = 0;
+    h.player.street = 0;
+    h.currentBet = 0;
+    h.minRaise = this.holdemBlinds().bb;
+    h.ai.acted = false;
+    h.player.acted = false;
+    const dealCount = h.phase === 'preflop' ? 3 : 1;
+    for (let i = 0; i < dealCount; i++) h.community.push(this.draw());
+    h.phase = h.phase === 'preflop' ? 'flop' : h.phase === 'flop' ? 'turn' : 'river';
+    h.toAct = null;
+    this.save();
+    this.broadcast();
+    await this.sleep();
+    if (this.state?.holdem !== h || this.state?.game !== 'holdem') return mt.returnedToLobby;
+    const streetName = mt.holdemPhaseName[h.phase] ?? '';
+    const dealtNote = mt.holdemNextStreetDealt(streetName, this.cards(h.community));
+    if (h.ai.allIn || h.player.allIn) {
+      return dealtNote + (await this.holdemRunout());
+    }
+    const first: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
+    h.toAct = first;
+    this.save();
+    this.broadcast();
+    if (first === 'ai') this.notifyHoldemTurn();
+    return dealtNote;
+  }
+
+  /** 无人还能下注:把剩余公共牌发完(逐街停顿),然后摊牌。 */
+  private async holdemRunout(): Promise<string> {
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    if (h.phase === 'runout') {
+      // 进程重启后从存档恢复的 runout:一次补发齐剩余公共牌再摊牌。
+      while (h.community.length < 5) h.community.push(this.draw());
+      this.save();
+      this.broadcast();
+      return this.holdemShowdown();
+    }
+    // 记下进入 runout 时所在的街(runout 期间 phase 固定为 'runout')。
+    let street: 'preflop' | 'flop' | 'turn' | 'river' = h.phase as 'preflop' | 'flop' | 'turn';
+    h.phase = 'runout';
+    h.toAct = null;
+    this.save();
+    this.broadcast();
+    await this.sleep();
+    while (this.state?.holdem === h && this.state?.game === 'holdem' && street !== 'river') {
+      const dealCount = street === 'preflop' ? 3 : 1;
+      for (let i = 0; i < dealCount; i++) h.community.push(this.draw());
+      street = street === 'preflop' ? 'flop' : street === 'flop' ? 'turn' : 'river';
+      this.save();
+      this.broadcast();
+      await this.sleep();
+    }
+    if (this.state?.holdem !== h || this.state?.game !== 'holdem') return mt.returnedToLobby;
+    return this.holdemShowdown();
+  }
+
+  /** 摊牌:双方亮牌,7 张选最强 5 张比大小,平则分池。 */
+  private holdemShowdown(): string {
+    const mt = this.mt();
+    const h = this.state!.holdem!;
+    const bestAi = bestPokerHand([...h.ai.cards, ...h.community]);
+    const bestPlayer = bestPokerHand([...h.player.cards, ...h.community]);
+    const cmp = comparePokerHands(bestAi.rank, bestPlayer.rank);
+    const madeAi = mt.holdemMadeName(bestAi.rank.cat, bestAi.rank.keys.map(pokerRankLabel));
+    const madePlayer = mt.holdemMadeName(bestPlayer.rank.cat, bestPlayer.rank.keys.map(pokerRankLabel));
+    const winner = cmp > 0 ? 'ai' : cmp < 0 ? 'player' : 'split';
+    return this.holdemSettle(winner, 'showdown', madeAi, madePlayer);
+  }
+
+  /** 结算:一次性划账(settle 模型),记档、翻庄位、推事件、回 idle(牌面留在桌上)。 */
+  private holdemSettle(winner: 'ai' | 'player' | 'split', by: 'fold' | 'showdown', madeAi: string, madePlayer: string): string {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.holdem;
+    if (!h) return mt.returnedToLobby;
+    const pot = h.ai.committed + h.player.committed;
+    const nextButton: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
+    let deltaAi: number;
+    let deltaPlayer: number;
+    if (winner === 'ai') {
+      deltaAi = h.player.committed;
+      deltaPlayer = -h.player.committed;
+    } else if (winner === 'player') {
+      deltaAi = -h.ai.committed;
+      deltaPlayer = h.ai.committed;
+    } else {
+      // 平分底池;奇数筹码归本手大盲(即下手庄位的对面)。
+      const half = Math.floor(pot / 2);
+      const odd = pot - half * 2;
+      const aiShare = nextButton === 'player' ? half + odd : half;
+      const playerShare = nextButton === 'ai' ? half + odd : half;
+      deltaAi = aiShare - h.ai.committed;
+      deltaPlayer = playerShare - h.player.committed;
+    }
+    state.ai.chips += deltaAi;
+    state.ai.net += deltaAi;
+    state.player.chips += deltaPlayer;
+    state.player.net += deltaPlayer;
+    if (winner === 'ai') {
+      state.ai.wins++;
+      state.player.losses++;
+    } else if (winner === 'player') {
+      state.player.wins++;
+      state.ai.losses++;
+    } else {
+      state.ai.pushes++;
+      state.player.pushes++;
+    }
+    h.winner = winner;
+    h.byFold = by === 'fold';
+    h.revealHole = by === 'showdown';
+    h.toAct = null;
+    h.phase = 'idle';
+    h.button = nextButton;
+    const record: HoldemRecord = {
+      at: nowIso(this.opts.timezone),
+      round: h.round,
+      winner,
+      by,
+      pot,
+      delta: deltaAi,
+      board: formatHand(h.community),
+      playerHole: formatHand(h.player.cards),
+      aiHole: by === 'showdown' ? formatHand(h.ai.cards) : [],
+      aiMade: by === 'showdown' ? madeAi : undefined,
+      playerMade: by === 'showdown' ? madePlayer : undefined,
+    };
+    recordHoldem(state, record);
+    this.save();
+    this.broadcast();
+    const winnerLabel = winner === 'ai' ? mt.holdemYouWinPot : winner === 'player' ? mt.holdemOwnerWinsPot : mt.holdemSplitPot;
+    const deltaText = `${deltaAi >= 0 ? '+' : ''}${deltaAi}`;
+    const board = formatHand(h.community).join(' ') || '—';
+    const line = by === 'fold'
+      ? mt.holdemResultFold(h.round, winnerLabel, pot, deltaText, state.ai.chips, state.player.chips, board)
+      : mt.holdemResultShowdown(h.round, madeAi, madePlayer, board, winnerLabel, pot, deltaText, state.ai.chips, state.player.chips);
+    void this.host?.pushEvent({
+      type: 'holdem.result',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: line,
+    }, { trigger: 'flush' });
+    return line;
+  }
+
   // ---------------------------------------------------------------- 面板
 
   private async handleInvoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
@@ -860,7 +1355,7 @@ export class CasinoWorld implements World {
 
     if (action === 'newgame') {
       const game = String(arg.game ?? '');
-      if (game !== 'blackjack' && game !== 'oldmaid') throw new Error(mt.errNewgameKind);
+      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);
       if (state.game !== null) throw new Error(mt.handNotFinished);
       if (game === 'blackjack') {
         const dealer = String(arg.dealer ?? '');
@@ -872,6 +1367,10 @@ export class CasinoWorld implements World {
         if (state.blackjack.aiRole === 'player') this.notifyBettingTurn();
         return this.snapshot();
       }
+      if (game === 'holdem') {
+        this.startHoldem();
+        return this.snapshot();
+      }
       this.startOldMaid();
       return this.snapshot();
     }
@@ -879,9 +1378,11 @@ export class CasinoWorld implements World {
       // 返回大厅:弃掉当前对局。筹码在下注时不动、结算时才划账,未结算的手直接作废即无损。
       if (state.game === null) return this.snapshot();
       if (state.blackjack?.dealerActing) throw new Error(mt.dealerTurnInProgress);
+      if (state.holdem && state.holdem.phase === 'runout') throw new Error(mt.holdemDealing);
       state.game = null;
       state.blackjack = null;
       state.oldmaid = null;
+      state.holdem = null;
       this.save();
       this.broadcast();
       return this.snapshot();
@@ -896,6 +1397,7 @@ export class CasinoWorld implements World {
     }
     if (action === 'resetmatch') {
       if (state.blackjack?.dealerActing) throw new Error(mt.matchResetDealerPlaying);
+      if (state.holdem && state.holdem.phase !== 'idle') throw new Error(mt.matchResetBusy);
       this.recordMatchAndReset();
       return this.snapshot();
     }
@@ -908,9 +1410,25 @@ export class CasinoWorld implements World {
         this.notifyInsuranceTurn();
         return this.snapshot();
       }
+      if (state.game === 'holdem' && state.holdem && !state.holdem.winner && state.holdem.toAct === 'ai' && state.holdem.phase !== 'runout' && state.holdem.phase !== 'idle') {
+        this.notifyHoldemTurn();
+        return this.snapshot();
+      }
       throw new Error(mt.errAINotWaiting);
     }
 
+    if (state.game === 'holdem' && ['fold', 'check', 'call', 'bet', 'raise'].includes(action)) {
+      // 德州面板动作(先于 21 点分支判断,两边都有 bet;bet/raise 带 amount)。
+      const result = await this.holdemAction('player', action === 'bet' || action === 'raise' ? { action, amount: arg.amount } : { action });
+      if (!result.ok) throw new Error(result.text);
+      return this.snapshot();
+    }
+    if (action === 'deal') {
+      if (state.game !== 'holdem' || !state.holdem) throw new Error(mt.errWrongGame);
+      if (state.holdem.phase !== 'idle') throw new Error(mt.handNotFinished);
+      await this.dealHoldemHand();
+      return this.snapshot();
+    }
     if (['bet', 'hit', 'stand', 'double', 'split', 'insurance', 'surrender'].includes(action)) {
       if (state.game !== 'blackjack' || !state.blackjack) throw new Error(mt.errWrongGame);
       if (state.blackjack.aiRole !== 'dealer') throw new Error(mt.youAreDealerNote);
@@ -1054,6 +1572,38 @@ export class CasinoWorld implements World {
         oldmaidHistory: om.history.slice(0, 10),
       };
     }
+    if (state.game === 'holdem' && state.holdem) {
+      const h = state.holdem;
+      const { sb, bb } = this.holdemBlinds();
+      return {
+        ...base,
+        game: 'holdem',
+        phase: h.phase,
+        round: h.round,
+        button: h.button,
+        toAct: h.toAct,
+        winner: h.winner,
+        revealHole: h.revealHole,
+        byFold: h.byFold,
+        blinds: { sb, bb },
+        streetCap: this.opts.cfg.maxBet,
+        currentBet: h.currentBet,
+        minRaise: h.minRaise,
+        pot: h.ai.committed + h.player.committed,
+        community: formatHand(h.community),
+        playerCards: formatHand(h.player.cards),
+        aiCards: h.revealHole ? formatHand(h.ai.cards) : null,
+        aiHoleCount: h.ai.cards.length,
+        aiCommitted: h.ai.committed,
+        playerCommitted: h.player.committed,
+        aiFolded: h.ai.folded,
+        playerFolded: h.player.folded,
+        aiAllIn: h.ai.allIn,
+        playerAllIn: h.player.allIn,
+        lastHoldem: h.history[0] ?? null,
+        holdemHistory: h.history.slice(0, 10),
+      };
+    }
     // 空桌,或刚结束的对局(牌面留在桌上)。
     const endedOldMaid = state.oldmaid;
     const endedBlackjack = state.blackjack;
@@ -1103,14 +1653,15 @@ export class CasinoWorld implements World {
     return state.shoe[state.drawn++]!;
   }
 
-  /** 「记录并重来」(21 点):归档当前场次(最多留 10 场),筹码与战绩清零,回选庄。 */
+  /** 「记录并重来」:归档当前场次(最多留 10 场),筹码与战绩清零,回大厅。 */
   private recordMatchAndReset(): void {
     const mt = this.mt();
     const state = this.state!;
     const bj = state.blackjack;
+    const hm = state.holdem;
     const winner: MatchRecord['winner'] =
       state.ai.chips > state.player.chips ? 'ai' : state.player.chips > state.ai.chips ? 'player' : 'tie';
-    const played = bj ? Math.max(0, bj.round - 1) : 0;
+    const played = bj ? Math.max(0, bj.round - 1) : hm ? hm.round : 0;
     const record: MatchRecord = {
       at: nowIso(this.opts.timezone),
       rounds: played,
@@ -1128,6 +1679,7 @@ export class CasinoWorld implements World {
     state.game = null;
     state.blackjack = null;
     state.oldmaid = null;
+    state.holdem = null;
     this.save();
     this.broadcast();
     void this.host?.pushEvent({

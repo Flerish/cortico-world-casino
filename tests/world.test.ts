@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolCallContext } from 'cortico/core/types.ts';
 import { dryMountWorld, fakeWorldContext } from 'cortico/extensions/dry-mount.ts';
+import { bestPokerHand, comparePokerHands } from '../src/cards.ts';
 import { CASINO } from '../src/definition.ts';
 import { CasinoWorld } from '../src/world.ts';
 import { CASINO_DEFAULTS, type CasinoConfigSection } from '../src/config.ts';
-import { loadTable, newSeat, type BlackjackState, type OldMaidState, type TableState } from '../src/table.ts';
+import { loadTable, newHoldemState, newSeat, type BlackjackState, type HoldemState, type OldMaidState, type TableState } from '../src/table.ts';
 import type { Card } from '../src/cards.ts';
 import { FakeHost } from './helpers/fake-host.ts';
 
@@ -28,11 +29,12 @@ function card(rank: number, suit: number): Card {
   return { rank, suit };
 }
 
-/** 预写一张牌桌:按补丁拼出双游戏结构,牌靴与筹码可覆盖。 */
+/** 预写一张牌桌:按补丁拼出三游戏结构,牌靴与筹码可覆盖。 */
 function rigTable(patch: {
-  game?: 'blackjack' | 'oldmaid' | null;
+  game?: 'blackjack' | 'oldmaid' | 'holdem' | null;
   blackjack?: Partial<BlackjackState>;
   oldmaid?: Partial<OldMaidState>;
+  holdem?: Partial<HoldemState>;
   shoe?: Card[];
   aiChips?: number;
   playerChips?: number;
@@ -75,6 +77,12 @@ function rigTable(patch: {
     ai: { ...newSeat(patch.aiChips ?? 1000), chips: patch.aiChips ?? 1000 },
     player: { ...newSeat(patch.playerChips ?? 1000), chips: patch.playerChips ?? 1000 },
     shoe: patch.shoe ?? [],
+    holdem: patch.game === 'holdem'
+      ? {
+          ...newHoldemState('player'),
+          ...(patch.holdem ?? {}),
+        }
+      : null,
     drawn: 0,
   };
   writeFileSync(join(dir, 'casino-table.json'), JSON.stringify(state), 'utf8');
@@ -93,7 +101,7 @@ async function tool(world: CasinoWorld, name: string, args: Record<string, unkno
 }
 
 type Snap = Record<string, unknown> & {
-  game: 'blackjack' | 'oldmaid' | null;
+  game: 'blackjack' | 'oldmaid' | 'holdem' | null;
   phase?: string;
   aiRole?: string;
   ai: { chips: number };
@@ -113,6 +121,20 @@ type Snap = Record<string, unknown> & {
     score: { ai: number; player: number };
     hiddenCard?: string | null;
   };
+  // ── 德州 ──
+  button?: 'ai' | 'player';
+  toAct?: 'ai' | 'player' | null;
+  revealHole?: boolean;
+  byFold?: boolean;
+  pot?: number;
+  currentBet?: number;
+  community?: string[];
+  aiCards?: string[] | null;
+  aiHoleCount?: number;
+  aiCommitted?: number;
+  playerCommitted?: number;
+  aiFolded?: boolean;
+  lastHoldem?: { winner: string; by: string; pot: number; delta: number; aiMade?: string; playerMade?: string } | null;
 };
 
 async function act(world: CasinoWorld, action: string, extra: Record<string, unknown> = {}): Promise<Snap> {
@@ -424,6 +446,7 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
         activeHand: 0, dealerCards: [card(6, 1), card(7, 1)], holeRevealed: false, dealerActing: true, history: [],
       },
       oldmaid: null,
+      holdem: null,
       ai: newSeat(1000),
       player: newSeat(1000),
       shoe: [],
@@ -436,5 +459,162 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     const snap = await act(world2, 'leave');
     expect(snap.game).toBeNull();
     await world2.stop();
+  });
+
+  // ── 德州扑克 ──
+
+  it('德州:开新局等发牌;发手后自动下盲注,庄位先行动,快照不下发 AI 底牌', async () => {
+    rigTable({});
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    const lobby = await act(world, 'newgame', { game: 'holdem' });
+    expect(lobby.game).toBe('holdem');
+    expect(lobby.phase).toBe('idle');
+    expect(lobby.round).toBe(0);
+    const snap = await act(world, 'deal');
+    expect(snap.phase).toBe('preflop');
+    expect(snap.round).toBe(1);
+    // 第一手庄位在玩家:玩家小盲 5,AI 大盲 10;庄位先行动。
+    expect(snap.button).toBe('player');
+    expect(snap.toAct).toBe('player');
+    expect(snap.pot).toBe(15);
+    expect(snap.currentBet).toBe(10);
+    expect(snap.playerCommitted).toBe(5);
+    expect(snap.aiCommitted).toBe(10);
+    expect(snap.community).toEqual([]);
+    // 不泄底:AI 底牌只有张数,没有牌面。
+    expect(snap.aiHoleCount).toBe(2);
+    expect(snap.aiCards).toBeNull();
+    expect(snap.playerCards!.length).toBe(2);
+    await world.stop();
+  });
+
+  it('德州:翻牌前弃牌,对手收下底池(settle 一次性划账),庄位轮换', async () => {
+    rigTable({});
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'holdem' });
+    await act(world, 'deal');
+    const snap = await act(world, 'fold');
+    expect(snap.winner).toBe('ai');
+    expect(snap.byFold).toBe(true);
+    expect(snap.revealHole).toBe(false);
+    // 玩家弃掉小盲 5:AI 净 +5,玩家净 -5。
+    expect(snap.ai.chips).toBe(1005);
+    expect(snap.player.chips).toBe(995);
+    // 下一手庄位轮到 AI。
+    expect(snap.button).toBe('ai');
+    expect(snap.phase).toBe('idle');
+    await world.stop();
+  });
+
+  it('德州:preflop check 非法(有注要跟);加注超过单街封顶被拒', async () => {
+    rigTable({});
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'holdem' });
+    await act(world, 'deal');
+    await expect(act(world, 'check')).rejects.toThrow();
+    await expect(act(world, 'raise', { amount: 300 })).rejects.toThrow();
+    await expect(act(world, 'bet', { amount: 5 })).rejects.toThrow(); // bet 只在没人下注的街
+    const still = await omState(world);
+    expect(still.toAct).toBe('player');
+    expect(still.pot).toBe(15);
+    await world.stop();
+  });
+
+  it('德州:限注跟注打满四街,摊牌亮牌比牌,赢家收池', async () => {
+    // 牌靴(庄位=玩家,发牌序:玩家/AI/玩家/AI → 翻 3 → 转 → 河):
+    // 玩家 ♠A ♠K,AI ♥J ♥Q;公共牌 ♠2 ♠3 ♠4 ♠5 ♥9 → 玩家 A 高同花,玩家赢。
+    // 预写路径要求整副 52 张:把用到的 9 张排前面,其余牌补在后面。
+    const used: Card[] = [
+      card(1, 0), card(11, 1), card(13, 0), card(12, 1),
+      card(2, 0), card(3, 0), card(4, 0), card(5, 0), card(9, 1),
+    ];
+    const rest: Card[] = [];
+    for (let suit = 0; suit < 4; suit++) {
+      for (let rank = 1; rank <= 13; rank++) {
+        if (!used.some((c) => c.rank === rank && c.suit === suit)) rest.push(card(rank, suit));
+      }
+    }
+    rigTable({ game: 'holdem', shoe: [...used, ...rest] });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    let snap = await act(world, 'deal');
+    expect(snap.toAct).toBe('player');
+    // 翻牌前:玩家跟注补齐 10,AI 有选择权过牌。
+    snap = await act(world, 'call');
+    expect(snap.toAct).toBe('ai');
+    expect(snap.community).toEqual([]);
+    // AI 过牌 → 翻牌(3 张)→ AI(非庄位)先行动。
+    const aiCheck1 = await tool(world, 'holdem_act', { action: 'check' });
+    expect(aiCheck1).toBeTruthy();
+    snap = await omState(world);
+    expect(snap.phase).toBe('flop');
+    expect(snap.community!.length).toBe(3);
+    expect(snap.toAct).toBe('ai');
+    // AI 下注 20,玩家跟注,AI 过牌 → 转牌;双方过牌 → 河牌;双方过牌 → 摊牌。
+    await tool(world, 'holdem_act', { action: 'bet', amount: 20 });
+    snap = await omState(world);
+    expect(snap.toAct).toBe('player');
+    expect(snap.currentBet).toBe(20);
+    snap = await act(world, 'call');
+    expect(snap.toAct).toBe('ai');
+    expect(snap.phase).toBe('turn');
+    await tool(world, 'holdem_act', { action: 'check' });
+    snap = await act(world, 'check');
+    expect(snap.phase).toBe('river');
+    expect(snap.community!.length).toBe(5);
+    await tool(world, 'holdem_act', { action: 'check' });
+    snap = await act(world, 'check');
+    expect(snap.winner).toBe('player');
+    expect(snap.revealHole).toBe(true);
+    expect(snap.aiCards!.length).toBe(2);
+    // 底池 60(双方各投 30):玩家 +30,AI -30。
+    expect(snap.player.chips).toBe(1030);
+    expect(snap.ai.chips).toBe(970);
+    expect(snap.lastHoldem!.by).toBe('showdown');
+    expect(snap.lastHoldem!.pot).toBe(60);
+    await world.stop();
+  });
+
+  it('德州:AI 回合工具弃牌,玩家收池;回执非空', async () => {
+    rigTable({});
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'holdem' });
+    await act(world, 'deal');
+    await act(world, 'fold'); // 玩家弃 → AI 赢;庄位轮到 AI。
+    const snap = await act(world, 'deal');
+    expect(snap.button).toBe('ai');
+    expect(snap.toAct).toBe('ai');
+    // 还没轮到 AI 之外的人:玩家动作被拒。
+    await expect(act(world, 'check')).rejects.toThrow();
+    const receipt = await tool(world, 'holdem_act', { action: 'fold' });
+    expect(receipt.length).toBeGreaterThan(0);
+    const done = await omState(world);
+    expect(done.winner).toBe('player');
+    // AI 是小盲弃 5,玩家净 +5:回到 1000/1000。
+    expect(done.ai.chips).toBe(1000);
+    expect(done.player.chips).toBe(1000);
+    await world.stop();
+  });
+
+  it('德州:牌力评估(同花>葫芦、轮子顺子、7 选 5)', () => {
+    // A 高同花 vs 葫芦:同花赢。
+    const flush = bestPokerHand([card(1, 0), card(13, 0), card(12, 0), card(5, 0), card(3, 0), card(9, 2), card(9, 3)]);
+    expect(flush.rank.cat).toBe(5);
+    // 轮子:A-2-3-4-5 是顺子(顶张 5)。
+    const wheel = bestPokerHand([card(1, 0), card(2, 1), card(3, 2), card(4, 3), card(5, 1), card(13, 2), card(12, 3)]);
+    expect(wheel.rank.cat).toBe(4);
+    expect(wheel.rank.keys[0]).toBe(5);
+    // 两对 + 踢脚:比较取高对在前。
+    const twoPair = bestPokerHand([card(13, 0), card(13, 1), card(9, 2), card(9, 3), card(5, 0), card(6, 1), card(7, 2)]);
+    expect(twoPair.rank.cat).toBe(2);
+    expect(twoPair.rank.keys).toEqual([13, 9, 7]);
+    // 四条 vs 葫芦。
+    const quads = bestPokerHand([card(9, 0), card(9, 1), card(9, 2), card(9, 3), card(5, 0), card(5, 1), card(6, 2)]);
+    const boat = bestPokerHand([card(13, 0), card(13, 1), card(13, 2), card(5, 0), card(5, 1), card(2, 2), card(3, 3)]);
+    expect(comparePokerHands(quads.rank, boat.rank)).toBeGreaterThan(0);
   });
 });

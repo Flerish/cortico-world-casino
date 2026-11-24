@@ -16,6 +16,7 @@ export type ModelLanguage = 'zh' | 'en';
 const zh = {
   statusGameBlackjack: '【21 点】',
   statusGameOldMaid: '【抽鬼牌】',
+  statusGameHoldem: '【德州扑克】',
   oldMaidTurnYou: (ownerCount: number) => `轮到你抽牌:从{{owner}}手中抽一张(对方现有 ${ownerCount} 张)。`,
   oldMaidTurnOwner: (aiCount: number) => `轮到{{owner}}抽牌(你现有 ${aiCount} 张)。`,
   oldMaidTurnNotify: (ownerCount: number) => `轮到你在抽鬼牌里抽牌了:从{{owner}}手中(现有 ${ownerCount} 张,背面朝上)随机抽一张。用 oldmaid_draw。`,
@@ -32,7 +33,7 @@ const zh = {
   oldMaidOver: (winner: string) => `抽鬼牌已结束(${winner})。`,
   oldMaidOverAlready: '这一局已经结束了。',
   oldMaidNotYourTurn: '还没轮到你抽牌。',
-  errNewgameKind: '游戏要写 blackjack 或 oldmaid。',
+  errNewgameKind: '游戏要写 blackjack、oldmaid 或 holdem。',
   errWrongGame: '牌桌上现在进行的不是这个游戏。',
   oldMaidHistoryTitle: (n: number) => `最近 ${n} 场抽鬼牌:`,
   oldMaidHistoryLine: (i: number, winner: string) => `${i}. ${winner}。`,
@@ -152,6 +153,75 @@ const zh = {
   // ── 提示(回执尾部) ──
   playerNextHint: '接下来用 casino_player 继续。',
   playerActingHint: '接下来用 casino_player 的 hit / stand / double;停牌后庄家按规则自动打完。',
+  // ── 德州扑克 ──
+  holdemPhaseName: { preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', runout: '发牌中', idle: '等下一手' },
+  holdemStatusTurnYou: '轮到你行动(弃/过/跟/下注/加注)。',
+  holdemStatusTurnOwner: '轮到{{owner}}行动。',
+  holdemStatusHead: (round: number, phase: string, buttonLabel: string, turnLabel: string) =>
+    `第 ${round} 手 · ${phase} · 庄位(小盲):${buttonLabel} · ${turnLabel}`,
+  holdemStatusBlinds: (sb: number, bb: number, cap: number) => `盲注 ${sb}/${bb},单街投入封顶 ${cap}。`,
+  holdemStatusPot: (pot: number, aiCommitted: number, playerCommitted: number, toCall: number, minTo: string) =>
+    `底池 ${pot}(你已投 ${aiCommitted},{{owner}}已投 ${playerCommitted});要跟 ${toCall},${minTo}。`,
+  holdemYourHole: (cards: string) => `你的底牌:${cards}。`,
+  holdemCommunity: (cards: string) => `公共牌:${cards}。`,
+  holdemCommunityEmpty: '公共牌还没发。',
+  holdemOwnerHoleHidden: (n: number) => `{{owner}}底牌 ${n} 张(背面)。`,
+  holdemOwnerHoleShown: (cards: string) => `{{owner}}底牌(已亮):${cards}。`,
+  holdemStatusChips: (ai: number, owner: number) => `筹码:你 ${ai} — {{owner}} ${owner}。`,
+  holdemHandOver: '这一手已经结束了,等{{owner}}发下一手。',
+  holdemDealFirst: '还没发牌,{{owner}}点「发下一手」开始。',
+  holdemDealing: '牌正在发,稍等。',
+  holdemNotYourTurn: '还没轮到你行动。',
+  holdemNotYourTurnOwner: '现在还轮不到{{owner}}行动。',
+  holdemNothingToCall: '没有注要跟:该过牌(check)或下注(bet)。',
+  holdemCannotCheck: '有注要跟,不能过牌:用 call、raise 或 fold。',
+  holdemBetNotInteger: (raw: string) => `下注额要是整数,收到 ${raw}。`,
+  holdemBetTooSmall: (min: number) => `下注至少 ${min}(大盲)。`,
+  holdemBetOverCap: (cap: number) => `本街投入封顶 ${cap}。`,
+  holdemBetOverBalance: (avail: number) => `你的余额只够 ${avail}。`,
+  holdemRaiseTooSmall: (minTo: number) => `加注至少到 ${minTo}(现注 + 最小加注增量)。`,
+  holdemRaiseIsBet: '这一街还没有人下注,用 bet 而不是 raise。',
+  holdemFacingAllIn: '对方已全押,只能 call 或 fold。',
+  holdemActionFold: (who: string) => `${who}弃牌。`,
+  holdemActionCheck: (who: string) => `${who}过牌。`,
+  holdemActionCall: (who: string, pay: number, allin: string) => `${who}跟注 ${pay}${allin}。`,
+  holdemActionBet: (who: string, amt: number, allin: string) => `${who}下注 ${amt}${allin}。`,
+  holdemActionRaise: (who: string, to: number, allin: string) => `${who}加注到 ${to}${allin}。`,
+  holdemAllInMark: '(全押)',
+  holdemBlindsPosted: (sb: number, sbWho: string, bb: number, bbWho: string, buttonLabel: string) =>
+    `盲注:小盲 ${sb}(${sbWho}),大盲 ${bb}(${bbWho});庄位在${buttonLabel}。`,
+  holdemNewHand: (round: number, sb: number, bb: number, buttonLabel: string) =>
+    `德州第 ${round} 手开始:盲注 ${sb}/${bb},庄位(小盲)在${buttonLabel}。`,
+  holdemTurnNotify: (round: number, phase: string, pot: number, toCall: number, minTo: number) =>
+    `轮到你在德州扑克行动(第 ${round} 手,${phase}):底池 ${pot},要跟 ${toCall},最小加注到 ${minTo}。先用 casino_table 看你的底牌与牌面,再用 holdem_act 行动(fold / check / call / bet / raise;bet、raise 必须带 amount:bet 是下注额,raise 是本街投入到的总额)。`,
+  holdemActReceipt: (actionText: string, cards: string, community: string, pot: string, next: string) =>
+    `你${actionText} 你的底牌:${cards}。公共牌:${community}。${pot}${next}`,
+  holdemNextYouAct: '接下来还是你行动,用 holdem_act 继续。',
+  holdemNextOwnerAct: '等{{owner}}行动。',
+  holdemNextStreetDealt: (street: string, cards: string) => `${street}发出:${cards}。`,
+  holdemResultFold: (round: number, winnerLabel: string, pot: number, delta: string, aiChips: number, ownerChips: number, board: string) =>
+    `第 ${round} 手:${winnerLabel}收下底池 ${pot}(${delta})。公共牌 ${board}。筹码:你 ${aiChips} — {{owner}} ${ownerChips}。`,
+  holdemResultShowdown: (round: number, yourMade: string, ownerMade: string, board: string, winnerLabel: string, pot: number, delta: string, aiChips: number, ownerChips: number) =>
+    `第 ${round} 手摊牌:你 ${yourMade},{{owner}} ${ownerMade};牌面 ${board}。${winnerLabel}底池 ${pot}(${delta})。筹码:你 ${aiChips} — {{owner}} ${ownerChips}。`,
+  holdemYouWinPot: '你赢下',
+  holdemOwnerWinsPot: '{{owner}}赢下',
+  holdemSplitPot: '双方平分',
+  holdemSplitNote: '(平分底池)',
+  holdemMadeName: (cat: number, r: string[]) =>
+    cat === 8 ? `同花顺(${r[0]} 高)`
+      : cat === 7 ? `四条 ${r[0]}`
+        : cat === 6 ? `葫芦(${r[0]} 带 ${r[1]})`
+          : cat === 5 ? `同花(${r[0]} 高)`
+            : cat === 4 ? `顺子(${r[0]} 高)`
+              : cat === 3 ? `三条 ${r[0]}`
+                : cat === 2 ? `两对 ${r[0]} 和 ${r[1]}`
+                  : cat === 1 ? `一对 ${r[0]}`
+                    : `高牌 ${r[0]}`,
+  holdemHistoryTitle: (n: number) => `最近 ${n} 手德州:`,
+  holdemHistoryLine: (i: number, round: number, winnerLabel: string, by: string, pot: number, delta: string) =>
+    `${i}. 第${round}手 ${winnerLabel}${by === 'fold' ? '(弃牌)' : '(摊牌)'} 底池 ${pot} — 净 ${delta}`,
+  holdemPotNote: (pot: number) => `底池 ${pot}。`,
+  matchResetBusy: '这一手还没打完,等结算后再归档重开。',
   // ── 面板动作错误(部署语言) ──
   handNotFinished: '这一手还没打完。',
   matchResetDealerPlaying: '庄家正在按规则打牌,等这一手结算完再归档重开。',
@@ -165,6 +235,7 @@ export type ModelText = typeof zh;
 const en: ModelText = {
   statusGameBlackjack: '[Blackjack]',
   statusGameOldMaid: '[Old Maid]',
+  statusGameHoldem: '[Texas Hold\'em]',
   oldMaidTurnYou: (ownerCount) => `Your turn to draw: take one card from {{owner}}'s hand (they hold ${ownerCount}).`,
   oldMaidTurnOwner: (aiCount) => `It is {{owner}}'s turn to draw (you hold ${aiCount}).`,
   oldMaidTurnNotify: (ownerCount) => `Your turn to draw in Old Maid: take one random card from {{owner}}'s hand (they hold ${ownerCount}, face down). Use oldmaid_draw.`,
@@ -181,7 +252,7 @@ const en: ModelText = {
   oldMaidOver: (winner) => `The Old Maid hand is over (${winner}).`,
   oldMaidOverAlready: 'This hand is already over.',
   oldMaidNotYourTurn: 'It is not your turn to draw.',
-  errNewgameKind: "The game must be blackjack or oldmaid.",
+  errNewgameKind: "The game must be blackjack, oldmaid, or holdem.",
   errWrongGame: 'The table is not running that game right now.',
   oldMaidHistoryTitle: (n) => `The last ${n} Old Maid games:`,
   oldMaidHistoryLine: (i, winner) => `${i}. ${winner}.`,
@@ -291,6 +362,74 @@ const en: ModelText = {
   historyDealerOwner: '{{owner}}',
   playerNextHint: 'Continue with casino_player.',
   playerActingHint: 'Continue with casino_player hit / stand / double; once you stand the dealer plays out by the table rule.',
+  holdemPhaseName: { preflop: 'pre-flop', flop: 'flop', turn: 'turn', river: 'river', runout: 'dealing', idle: 'between hands' },
+  holdemStatusTurnYou: 'Your turn to act (fold/check/call/bet/raise).',
+  holdemStatusTurnOwner: 'Waiting for {{owner}} to act.',
+  holdemStatusHead: (round, phase, buttonLabel, turnLabel) =>
+    `Hand ${round} · ${phase} · button (small blind): ${buttonLabel} · ${turnLabel}`,
+  holdemStatusBlinds: (sb, bb, cap) => `Blinds ${sb}/${bb}, each street capped at ${cap}.`,
+  holdemStatusPot: (pot, aiCommitted, playerCommitted, toCall, minTo) =>
+    `Pot ${pot} (you have put in ${aiCommitted}, {{owner}} ${playerCommitted}); to call ${toCall}, ${minTo}.`,
+  holdemYourHole: (cards) => `Your hole cards: ${cards}.`,
+  holdemCommunity: (cards) => `Board: ${cards}.`,
+  holdemCommunityEmpty: 'The board has not been dealt yet.',
+  holdemOwnerHoleHidden: (n) => `{{owner}}'s hole cards: ${n} (face down).`,
+  holdemOwnerHoleShown: (cards) => `{{owner}}'s hole cards (revealed): ${cards}.`,
+  holdemStatusChips: (ai, owner) => `Chips: you ${ai} — {{owner}} ${owner}.`,
+  holdemHandOver: 'This hand is over; wait for {{owner}} to deal the next one.',
+  holdemDealFirst: 'No cards out yet; {{owner}} taps "Deal next hand" to start.',
+  holdemDealing: 'Cards are being dealt; wait a moment.',
+  holdemNotYourTurn: 'It is not your turn to act.',
+  holdemNotYourTurnOwner: 'It is not {{owner}}\'s turn to act.',
+  holdemNothingToCall: 'There is no bet to call: check or bet instead.',
+  holdemCannotCheck: 'There is a bet to call: use call, raise, or fold.',
+  holdemBetNotInteger: (raw) => `The bet must be an integer, got ${raw}.`,
+  holdemBetTooSmall: (min) => `A bet must be at least ${min} (the big blind).`,
+  holdemBetOverCap: (cap) => `This street is capped at ${cap}.`,
+  holdemBetOverBalance: (avail) => `Your balance only covers ${avail}.`,
+  holdemRaiseTooSmall: (minTo) => `A raise must be to at least ${minTo} (current bet + minimum raise).`,
+  holdemRaiseIsBet: 'Nobody has bet this street yet; use bet, not raise.',
+  holdemFacingAllIn: 'The opponent is all-in; only call or fold.',
+  holdemActionFold: (who) => `${who} folds.`,
+  holdemActionCheck: (who) => `${who} checks.`,
+  holdemActionCall: (who, pay, allin) => `${who} calls ${pay}${allin}.`,
+  holdemActionBet: (who, amt, allin) => `${who} bets ${amt}${allin}.`,
+  holdemActionRaise: (who, to, allin) => `${who} raises to ${to}${allin}.`,
+  holdemAllInMark: ' (all-in)',
+  holdemBlindsPosted: (sb, sbWho, bb, bbWho, buttonLabel) =>
+    `Blinds: small blind ${sb} (${sbWho}), big blind ${bb} (${bbWho}); the button is with ${buttonLabel}.`,
+  holdemNewHand: (round, sb, bb, buttonLabel) =>
+    `Hold'em hand ${round} begins: blinds ${sb}/${bb}, the button (small blind) is with ${buttonLabel}.`,
+  holdemTurnNotify: (round, phase, pot, toCall, minTo) =>
+    `Your turn to act in Hold'em (hand ${round}, ${phase}): pot ${pot}, to call ${toCall}, minimum raise to ${minTo}. Check casino_table for your hole cards and the board first, then act with holdem_act (fold / check / call / bet / raise; bet and raise take amount: for bet it is the stake, for raise it is the street total to raise to).`,
+  holdemActReceipt: (actionText, cards, community, pot, next) =>
+    `You ${actionText} Your hole cards: ${cards}. Board: ${community}. ${pot}${next}`,
+  holdemNextYouAct: 'You act again; continue with holdem_act.',
+  holdemNextOwnerAct: 'Waiting for {{owner}} to act.',
+  holdemNextStreetDealt: (street, cards) => `${street} dealt: ${cards}.`,
+  holdemResultFold: (round, winnerLabel, pot, delta, aiChips, ownerChips, board) =>
+    `Hand ${round}: ${winnerLabel} the pot of ${pot} (${delta}). Board ${board}. Chips: you ${aiChips} — {{owner}} ${ownerChips}.`,
+  holdemResultShowdown: (round, yourMade, ownerMade, board, winnerLabel, pot, delta, aiChips, ownerChips) =>
+    `Hand ${round} showdown: you hold ${yourMade}, {{owner}} ${ownerMade}; board ${board}. ${winnerLabel} the pot of ${pot} (${delta}). Chips: you ${aiChips} — {{owner}} ${ownerChips}.`,
+  holdemYouWinPot: 'you take',
+  holdemOwnerWinsPot: '{{owner}} takes',
+  holdemSplitPot: 'the pot is split',
+  holdemSplitNote: ' (split pot)',
+  holdemMadeName: (cat, r) =>
+    cat === 8 ? `straight flush (${r[0]} high)`
+      : cat === 7 ? `four of a kind, ${r[0]}s`
+        : cat === 6 ? `full house (${r[0]}s over ${r[1]}s)`
+          : cat === 5 ? `flush (${r[0]} high)`
+            : cat === 4 ? `straight (${r[0]} high)`
+              : cat === 3 ? `three of a kind, ${r[0]}s`
+                : cat === 2 ? `two pair, ${r[0]}s and ${r[1]}s`
+                  : cat === 1 ? `a pair of ${r[0]}s`
+                    : `high card ${r[0]}`,
+  holdemHistoryTitle: (n) => `The last ${n} Hold'em hands:`,
+  holdemHistoryLine: (i, round, winnerLabel, by, pot, delta) =>
+    `${i}. Hand ${round} ${winnerLabel}${by === 'fold' ? ' (fold)' : ' (showdown)'}, pot ${pot} — net ${delta}`,
+  holdemPotNote: (pot) => `Pot ${pot}.`,
+  matchResetBusy: 'The current hand is not finished; wait for the settlement before archiving.',
   handNotFinished: 'The current hand is not finished yet.',
   matchResetDealerPlaying: 'The dealer is playing by the rules; wait for the hand to settle before archiving.',
   errNewgameDealerArg: 'The dealer must be ai or player.',

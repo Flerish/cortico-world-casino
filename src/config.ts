@@ -14,6 +14,8 @@ export interface CasinoConfigSection {
   dealerHitsSoft17: boolean;
   /** 庄家翻暗牌与每张补牌之间的停顿毫秒数,0 = 不停顿。热改:下一次发牌生效。 */
   dealDelayMs: number;
+  /** 德州扑克的大盲注(小盲自动 = 大盲的一半向下取整);也是德州单街加注的封顶线。热改:下一手生效。 */
+  holdemBlind: number;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -23,6 +25,7 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   maxBet: 200,
   dealerHitsSoft17: false,
   dealDelayMs: 700,
+  holdemBlind: 10,
 };
 
 const TEXT = {
@@ -33,6 +36,7 @@ const TEXT = {
     maxBet: { title: '单手最大下注', description: '一手牌最多能押的筹码数。' },
     dealerHitsSoft17: { title: '庄家软 17 补牌(H17)', description: '开 = 庄家软 17 也要牌;关 = 软 17 停牌(S17,默认)。' },
     dealDelayMs: { title: '发牌停顿(毫秒)', description: '庄家翻暗牌、每补一张牌之间的停顿,让牌面看得清;0 = 不停顿。' },
+    holdemBlind: { title: '德州大盲注', description: '德州扑克的大盲注(小盲 = 其一半向下取整);同时是德州的加注封顶线。' },
   },
   en: {
     title: 'Moonlit Table',
@@ -41,6 +45,7 @@ const TEXT = {
     maxBet: { title: 'Maximum bet per hand', description: 'The most one hand may stake.' },
     dealerHitsSoft17: { title: 'Dealer hits soft 17 (H17)', description: 'On = dealer draws to soft 17; off = dealer stands on all 17s (S17, default).' },
     dealDelayMs: { title: 'Deal pacing (ms)', description: 'Pause between the hole-card reveal and each dealer draw; 0 = no pacing.' },
+    holdemBlind: { title: 'Hold\'em big blind', description: 'The Texas Hold\'em big blind (small blind = half, rounded down); it also caps each betting street in Hold\'em.' },
   },
 } as const;
 
@@ -91,6 +96,13 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           description: t.dealDelayMs.description,
           minimum: 0,
           maximum: 5000,
+          'x-hot': true,
+        },
+        'worlds.casino.holdemBlind': {
+          type: 'number',
+          title: t.holdemBlind.title,
+          description: t.holdemBlind.description,
+          minimum: 2,
           'x-hot': true,
         },
       },

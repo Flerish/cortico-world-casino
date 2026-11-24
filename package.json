@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-casino",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "type": "module",
-  "description": "月下牌桌:一张就在电脑里的牌桌,和你的 AI 同桌对打——21 点(选庄、下注、要牌、分牌、保险、投降)与抽鬼牌(藏一张、点选抽牌、终局亮牌)两个游戏,绿呢桌面实时显示双方手牌;筹码是游戏内数字,不涉及真钱。",
+  "description": "月下牌桌:一张就在电脑里的牌桌,和你的 AI 同桌对打——21 点(选庄、下注、要牌、分牌、保险、投降)、抽鬼牌(藏一张、点选抽牌、终局亮牌)与两人德州扑克(盲注轮转、四街限注、摊牌比牌)三个游戏,绿呢桌面实时显示牌局;筹码是游戏内数字,不涉及真钱。",
   "license": "MIT",
   "homepage": "https://github.com/Flerish/cortico-world-casino#readme",
   "repository": {
@@ -35,7 +35,7 @@
     "locales": {
       "en": {
         "displayName": "Moonlit Table",
-        "description": "A card table inside your computer shared with your AI: blackjack (pick the dealer, bet, hit, split, insure, surrender) and Old Maid (one card hidden, click a face-down card to draw, reveal at the end) on one felt table that shows both hands live; chips are game numbers only."
+        "description": "A card table inside your computer shared with your AI: blackjack (pick the dealer, bet, hit, split, insure, surrender), Old Maid (one card hidden, click a face-down card to draw, reveal at the end) and heads-up Texas Hold'em (rotating blinds, capped-limit streets, showdown) on one felt table that shows the game live; chips are game numbers only."
       }
     },
     "tags": [

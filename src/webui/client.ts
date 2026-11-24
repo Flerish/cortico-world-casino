@@ -51,7 +51,7 @@ interface MatchView {
 
 interface Snapshot {
   version: number;
-  game: 'blackjack' | 'oldmaid' | null;
+  game: 'blackjack' | 'oldmaid' | 'holdem' | null;
   ai: SeatView;
   player: SeatView;
   minBet: number;
@@ -87,6 +87,41 @@ interface Snapshot {
   /** 终局才亮:开局藏起来的那张牌(进行中不下发)。 */
   hiddenCard?: string | null;
   oldmaidHistory?: Array<{ at: string; draws: number; discardPairs: number; hidden?: string; winner: string }>;
+  // ── 德州扑克(game==='holdem') ──
+  button?: 'ai' | 'player';
+  toAct?: 'ai' | 'player' | null;
+  revealHole?: boolean;
+  byFold?: boolean;
+  blinds?: { sb: number; bb: number };
+  streetCap?: number;
+  currentBet?: number;
+  minRaise?: number;
+  pot?: number;
+  community?: string[];
+  aiCards?: string[] | null;
+  aiHoleCount?: number;
+  aiCommitted?: number;
+  playerCommitted?: number;
+  aiFolded?: boolean;
+  playerFolded?: boolean;
+  aiAllIn?: boolean;
+  playerAllIn?: boolean;
+  lastHoldem?: HoldemRecordView | null;
+  holdemHistory?: HoldemRecordView[];
+}
+
+interface HoldemRecordView {
+  at: string;
+  round: number;
+  winner: 'ai' | 'player' | 'split';
+  by: 'fold' | 'showdown';
+  pot: number;
+  delta: number;
+  board: string[];
+  playerHole: string[];
+  aiHole: string[];
+  aiMade?: string;
+  playerMade?: string;
 }
 
 const SUIT_TONE: Record<string, string> = { '♠': 'idx-black', '♣': 'idx-black', '♥': 'idx-red', '♦': 'idx-red' };
@@ -179,7 +214,7 @@ function bjResultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
 
 function render(ctx: WebUiPanelContext, state: Snapshot): void {
   current = state;
-  if (state.game !== 'blackjack') ui.bet = 0;
+  if (state.game !== 'blackjack' && state.game !== 'holdem') ui.bet = 0;
   const T = panelText(ctx.language);
   const root = ctx.root;
   root.replaceChildren();
@@ -325,8 +360,11 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   topbarLeft.append(el('span', 'casino-title', T.title));
   topbar.append(topbarLeft);
   const softLabel = state.dealerHitsSoft17 ? T.soft17Hit : T.soft17Stand;
-  const gameLabel = state.game === 'blackjack' ? (state.aiRole === 'dealer' ? T.roleText.aiDealer : T.roleText.meDealer) : state.game === 'oldmaid' ? T.gamePicker.oldmaidTitle : T.roleText.noGame;
-  topbar.append(el('span', 'casino-round', `${gameLabel} · ${softLabel}`));
+  const gameLabel = state.game === 'blackjack' ? (state.aiRole === 'dealer' ? T.roleText.aiDealer : T.roleText.meDealer)
+    : state.game === 'oldmaid' ? T.gamePicker.oldmaidTitle
+      : state.game === 'holdem' ? `${T.gamePicker.holdemTitle} · ${T.holdem.blindsLabel(state.blinds?.sb ?? 0, state.blinds?.bb ?? 0)}`
+        : T.roleText.noGame;
+  topbar.append(el('span', 'casino-round', `${gameLabel}${state.game === 'holdem' ? '' : ` · ${softLabel}`}`));
   const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? T.rulesClose : T.rulesBtn);
   rulesBtn.type = 'button';
   rulesBtn.addEventListener('click', () => {
@@ -391,6 +429,28 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     omInfo.append(omBtns);
     omCard.append(omInfo);
     felt.append(omCard);
+
+    // 德州卡:两张背面底牌 + 三张公共牌的悬念
+    const heCard = el('div', 'game-card');
+    const heRow = el('div', 'cards lobby-cards');
+    const heBack1 = cardEl('', true);
+    const heBack2 = cardEl('', true);
+    const heFlop = cardEl('♠K');
+    heFlop.classList.add('tilt');
+    heRow.append(heBack1, heBack2, heFlop);
+    heCard.append(heRow);
+    const heInfo = el('div', 'game-info');
+    const heName = el('div', 'game-name');
+    heName.append(el('span', undefined, T.gamePicker.holdemTitle), el('span', 'game-tag', T.gamePicker.holdemTag));
+    heInfo.append(heName, el('div', 'game-desc', T.gamePicker.holdemDesc));
+    const heBtns = el('div', 'btnrow');
+    const heBtn = el('button', 'primary', T.gamePicker.holdemStart);
+    heBtn.type = 'button';
+    heBtn.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'holdem' }), { signal: ctx.signal });
+    heBtns.append(heBtn);
+    heInfo.append(heBtns);
+    heCard.append(heInfo);
+    felt.append(heCard);
   }
 
   // ── 21 点桌面 ──
@@ -588,6 +648,224 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     }
   }
 
+  // ── 德州扑克桌面 ──
+  if (state.game === 'holdem') {
+    const he = {
+      phase: (state.phase as string) ?? 'idle',
+      round: state.round ?? 0,
+      button: state.button ?? 'player',
+      toAct: state.toAct,
+      winner: state.winner,
+      revealHole: state.revealHole ?? false,
+      byFold: state.byFold ?? false,
+      blinds: state.blinds ?? { sb: 5, bb: 10 },
+      streetCap: state.streetCap ?? state.maxBet,
+      currentBet: state.currentBet ?? 0,
+      minRaise: state.minRaise ?? 10,
+      pot: state.pot ?? 0,
+      community: state.community ?? [],
+      playerCards: state.playerCards ?? [],
+      aiCards: state.aiCards ?? null,
+      aiHoleCount: state.aiHoleCount ?? 0,
+      aiCommitted: state.aiCommitted ?? 0,
+      playerCommitted: state.playerCommitted ?? 0,
+      aiFolded: state.aiFolded ?? false,
+      aiAllIn: state.aiAllIn ?? false,
+      playerAllIn: state.playerAllIn ?? false,
+      lastHoldem: state.lastHoldem ?? null,
+      holdemHistory: state.holdemHistory ?? [],
+    };
+    const phaseName = T.holdem.phaseName[he.phase as keyof typeof T.holdem.phaseName] ?? he.phase;
+    const felt = el('div', 'felt');
+    wrap.append(felt);
+
+    // 对方席(上):庄位标识;摊牌亮底牌,其余背面
+    const aiSeat = el('div', 'seat');
+    const aiHead = el('div', 'seat-head');
+    aiHead.append(el('span', undefined, T.ai));
+    if (he.button === 'ai' && he.round > 0) aiHead.append(el('span', 'seat-role', T.holdem.buttonBadge));
+    if (he.aiFolded) aiHead.append(el('span', 'seat-role', T.holdem.aiFolded));
+    aiSeat.append(aiHead);
+    const aiCardsRow = el('div', 'cards');
+    if (he.revealHole && he.aiCards && he.aiCards.length) {
+      for (const text of he.aiCards) aiCardsRow.append(cardEl(text));
+    } else {
+      const n = Math.max(he.aiHoleCount, he.round > 0 ? 2 : 0);
+      for (let i = 0; i < n; i++) aiCardsRow.append(cardEl('', true));
+    }
+    aiSeat.append(aiCardsRow);
+    aiSeat.append(el('div', 'total-pill', he.revealHole && he.aiCards?.length ? T.holdem.aiHoleShown(he.aiCards.join(' ')) : T.holdem.aiHoleHidden(Math.max(he.aiHoleCount, he.round > 0 ? 2 : 0))));
+    const aiFoot = el('div', 'seat-head');
+    aiFoot.append(chipsEl(T.chips, state.ai.chips, 'blue'));
+    aiFoot.append(el('span', 'seatstats', statsLine(T, state.ai)));
+    aiSeat.append(aiFoot);
+    felt.append(aiSeat);
+
+    // 中间:公共牌 + 底池
+    const pot = el('div', 'pot');
+    const potInner = el('div', 'pot-inner');
+    potInner.append(el('div', undefined, `${T.holdem.potLabel} · ${T.holdem.blindsLabel(he.blinds.sb, he.blinds.bb)} · ${T.holdem.capIs(he.streetCap)}`));
+    potInner.append(el('div', 'pot-num', String(he.pot)));
+    if (he.round > 0) potInner.append(el('div', undefined, T.holdem.roundLabel(he.round, phaseName)));
+    const communityRow = el('div', 'cards');
+    if (he.community.length) {
+      for (const text of he.community) communityRow.append(cardEl(text));
+    } else {
+      for (let i = 0; i < 5; i++) communityRow.append(cardEl('', true));
+    }
+    potInner.append(communityRow);
+    pot.append(potInner);
+    felt.append(pot);
+
+    // 你的席(下,明牌)
+    const playerSeat = el('div', 'seat');
+    const playerHead = el('div', 'seat-head');
+    playerHead.append(el('span', undefined, T.me));
+    if (he.button === 'player' && he.round > 0) playerHead.append(el('span', 'seat-role', T.holdem.buttonBadge));
+    playerSeat.append(playerHead);
+    const playerCardsRow = el('div', 'cards');
+    if (he.playerCards.length) {
+      for (const text of he.playerCards) playerCardsRow.append(cardEl(text));
+    } else {
+      playerCardsRow.append(cardEl('', true));
+    }
+    playerSeat.append(playerCardsRow);
+    playerSeat.append(el('div', 'total-pill', `本手投入 ${he.playerCommitted} / 底池 ${he.pot}`));
+    const playerFoot = el('div', 'seat-head');
+    playerFoot.append(chipsEl(T.chips, state.player.chips, 'gold'));
+    playerFoot.append(el('span', 'seatstats', statsLine(T, state.player)));
+    playerSeat.append(playerFoot);
+    felt.append(playerSeat);
+
+    // ── 横幅与操作 ──
+    const bannerBox = el('div');
+    wrap.append(bannerBox);
+    const last = he.lastHoldem;
+    if (he.winner && last) {
+      const playerDelta = -last.delta;
+      const banner = el('div', `banner ${playerDelta > 0 ? 'win' : playerDelta < 0 ? 'lose' : 'push'}`);
+      const pill = outcomePill(T, playerDelta > 0 ? 'win' : playerDelta < 0 ? 'lose' : 'push');
+      const madeText = last.by === 'showdown' ? T.holdem.madeLine(last.aiMade ?? '', last.playerMade ?? '') : T.holdem.foldLine;
+      banner.append(pill, el('span', 'banner-text', `${T.holdem.winnerBanner(he.winner, last.pot)} · ${madeText}`),
+        el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`));
+      bannerBox.append(banner);
+    }
+
+    const myTurn = he.toAct === 'player' && !he.winner && he.phase !== 'runout' && he.phase !== 'idle';
+    if (he.phase === 'idle') {
+      if (!he.winner && he.round === 0) {
+        const wait = el('div', 'banner wait');
+        wait.append(el('span', 'banner-text', T.holdem.dealFirst));
+        bannerBox.append(wait);
+      }
+      const row = el('div', 'btnrow');
+      const deal = el('button', 'primary', T.holdem.dealBtn);
+      deal.type = 'button';
+      deal.addEventListener('click', () => void send(ctx, T, 'deal'), { signal: ctx.signal });
+      row.append(deal);
+      wrap.append(row);
+    } else if (myTurn) {
+      const toCall = Math.max(0, he.currentBet - he.playerCommitted);
+      const isBet = he.currentBet === 0;
+      const myAvail = Math.max(0, state.player.chips - he.playerCommitted);
+      const minTo = isBet ? he.blinds.bb : he.currentBet + he.minRaise;
+      const maxTo = Math.min(he.streetCap, he.playerCommitted + myAvail);
+      const canFullRaise = maxTo >= minTo;
+      const row = el('div', 'btnrow');
+      const foldBtn = el('button', 'danger', T.holdem.fold);
+      foldBtn.type = 'button';
+      foldBtn.addEventListener('click', () => void send(ctx, T, 'fold'), { signal: ctx.signal });
+      row.append(foldBtn);
+      if (toCall === 0) {
+        const check = el('button', 'primary', T.holdem.check);
+        check.type = 'button';
+        check.addEventListener('click', () => void send(ctx, T, 'check'), { signal: ctx.signal });
+        row.append(check);
+      } else {
+        const call = el('button', 'primary', he.playerAllIn ? `${T.holdem.call(Math.min(toCall, myAvail))} · ${T.holdem.allin}` : T.holdem.call(toCall));
+        call.type = 'button';
+        call.addEventListener('click', () => void send(ctx, T, 'call'), { signal: ctx.signal });
+        row.append(call);
+      }
+      wrap.append(row);
+      // 下注/加注构建器:筹码累加,目标额 = 本街投入到的总额
+      if (canFullRaise || myAvail > toCall) {
+        ui.bet = Math.min(Math.max(ui.bet, minTo), maxTo);
+        const build = el('div', 'betbuild');
+        const view = el('span', 'betview', isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet));
+        const clear = el('button', undefined, T.clear);
+        clear.type = 'button';
+        const go = el('button', 'primary', isBet ? T.holdem.bet : T.holdem.raiseTo(ui.bet));
+        go.type = 'button';
+        const sync = (): void => {
+          view.textContent = isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet);
+          clear.disabled = ui.bet <= minTo;
+          go.disabled = ui.bet < minTo || ui.bet > maxTo;
+        };
+        const add = (n: number): void => {
+          ui.bet = Math.min(maxTo, ui.bet + n);
+          sync();
+        };
+        for (const [label, n, tone] of [[T.chip10, 10, 'red'], [T.chip50, 50, 'green'], [T.chip100, 100, 'black']] as const) {
+          const chip = el('div', `chip chip-${tone}`, label);
+          chip.addEventListener('click', () => add(n), { signal: ctx.signal });
+          build.append(chip);
+        }
+        const allin = el('div', 'chip chip-gold', T.holdem.allin);
+        allin.addEventListener('click', () => {
+          ui.bet = maxTo;
+          sync();
+        }, { signal: ctx.signal });
+        build.append(allin, view, el('span', 'casino-idle', `${T.holdem.minRaiseIs(minTo)}`));
+        wrap.append(build);
+        clear.addEventListener('click', () => {
+          ui.bet = minTo;
+          sync();
+        }, { signal: ctx.signal });
+        go.addEventListener('click', () => void send(ctx, T, isBet ? 'bet' : 'raise', { amount: ui.bet }), { signal: ctx.signal });
+        const row2 = el('div', 'btnrow');
+        row2.append(clear, go);
+        wrap.append(row2);
+      }
+    } else if (he.phase === 'runout') {
+      const wait = el('div', 'banner wait');
+      wait.append(el('span', 'banner-text', T.holdem.dealing));
+      bannerBox.append(wait);
+    } else if (he.toAct === 'ai' && !he.winner) {
+      const toCallAi = Math.max(0, he.currentBet - he.aiCommitted);
+      const wait = el('div', 'banner wait');
+      wait.append(el('span', 'banner-text', T.holdem.aiThinkingTurn(toCallAi)));
+      const nudge = el('button', undefined, T.nudge);
+      nudge.type = 'button';
+      nudge.addEventListener('click', () => void send(ctx, T, 'nudge'), { signal: ctx.signal });
+      wait.append(nudge);
+      bannerBox.append(wait);
+    }
+
+    // ── 德州手历史 ──
+    const heHistory = el('div', 'history');
+    const heToggle = el('button', 'history-toggle', T.historyToggle(ui.historyOpen, he.holdemHistory.length));
+    heToggle.type = 'button';
+    heToggle.addEventListener('click', () => {
+      ui.historyOpen = !ui.historyOpen;
+      heToggle.textContent = T.historyToggle(ui.historyOpen, he.holdemHistory.length);
+      heList.classList.toggle('hidden', !ui.historyOpen);
+    }, { signal: ctx.signal });
+    heHistory.append(heToggle);
+    const heList = el('div');
+    heList.classList.toggle('hidden', !ui.historyOpen);
+    for (const record of he.holdemHistory) {
+      const line = el('div', 'history-line');
+      line.append(el('span', undefined, `${T.holdem.roundLabel(record.round, '')} ${record.by === 'fold' ? T.holdem.foldLine : (record.playerMade ?? '')}`));
+      line.append(el('span', 'history-cards', `${record.playerHole.join(' ')} vs ${record.aiHole.length ? record.aiHole.join(' ') : '??'} · ${record.board.join(' ')}`));
+      const playerDelta = -record.delta;
+      line.append(el('span', `delta ${playerDelta >= 0 ? 'up' : 'down'}`, `${playerDelta >= 0 ? '+' : ''}${playerDelta}`));
+      heList.append(line);
+    }
+    heHistory.append(heList);
+    wrap.append(heHistory);
+  }
+
   // ── 抽鬼牌桌面 ──
   if (state.game === 'oldmaid' || (state.game === null && state.winner !== undefined && state.playerCards)) {
     const omEnded = state.game === null;
@@ -726,9 +1004,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     wrap.append(history);
   }
 
-  // ── 场次记录(21 点) ──
+  // ── 场次记录(21 点 / 德州共用) ──
   const matches = state.matches ?? [];
-  if (state.game === 'blackjack' || matches.length > 0) {
+  if (state.game === 'blackjack' || state.game === 'holdem' || matches.length > 0) {
     const matchBox = el('div', 'history');
     const matchToggle = el('button', 'history-toggle', T.matchToggle(ui.matchOpen, matches.length));
     matchToggle.type = 'button';
@@ -760,16 +1038,18 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   wrap.append(el('div', 'casino-error'));
 }
 
-/** 规则说明浮层:右上角按钮展开;内容随桌面当前游戏切换,空桌时两个游戏的规则都给(按浏览器语言)。 */
-function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'oldmaid' | null): HTMLElement {
+/** 规则说明浮层:右上角按钮展开;内容随桌面当前游戏切换,空桌时所有游戏的规则都给(按浏览器语言)。 */
+function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'oldmaid' | 'holdem' | null): HTMLElement {
   const overlay = el('div', 'rules-overlay');
   const card = el('div', 'rules-card');
   const tpl = document.createElement('template');
   tpl.innerHTML = game === 'oldmaid'
     ? T.rulesOldmaidHtml
-    : game === 'blackjack'
+    : game === 'holdem'
+      ? T.rulesHoldemHtml
+        : game === 'blackjack'
       ? T.rulesBlackjackHtml
-      : `${T.rulesBlackjackHtml}\n${T.rulesOldmaidHtml}`;
+      : `${T.rulesBlackjackHtml}\n${T.rulesOldmaidHtml}\n${T.rulesHoldemHtml}`;
   card.append(tpl.content.cloneNode(true));
   const close = el('button', 'rules-close', T.rulesCloseBtn);
   close.type = 'button';

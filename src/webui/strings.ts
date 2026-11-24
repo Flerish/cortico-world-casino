@@ -105,6 +105,27 @@ const zh = {
       <li>弃牌堆会展示最近弃掉的对子——据此推理对方手里还留着什么、鬼牌落在谁那边。</li>
     </ul>
   `,
+  rulesHoldemHtml: `
+    <h4>怎么开局</h4>
+    <p>点「开局」→ 每手点「发下一手」:庄位(每手轮换)自动押小盲、对方押大盲 → 各发 2 张底牌 → 翻牌前下注 → 翻牌 3 张 → 下注 → 转牌 → 下注 → 河牌 → 下注 → 摊牌。</p>
+    <h4>单挑行动顺序</h4>
+    <ul>
+      <li><b>翻牌前:</b>庄位(小盲)先行动,大盲最后——没人加注时大盲可以免费过牌。</li>
+      <li><b>翻牌后:</b>反过来,大盲先行动,庄位永远后手(庄位的补偿优势)。</li>
+    </ul>
+    <h4>下注规则(限注桌)</h4>
+    <ul>
+      <li>动作:弃牌、过牌、跟注、下注、加注;单街投入封顶 = 配置的「单手最大下注」。</li>
+      <li>最小加注 = 现注 + 加注增量;筹码不足时可以全押(短筹码加注不再加价)。</li>
+      <li>一方全押后直接发完公共牌摊牌,不再有弃牌。</li>
+    </ul>
+    <h4>比牌(7 张选最强 5 张)</h4>
+    <ul>
+      <li>从大到小:同花顺 &gt; 四条 &gt; 葫芦 &gt; 同花 &gt; 顺子 &gt; 三条 &gt; 两对 &gt; 一对 &gt; 高牌;平局平分底池(奇数筹码归大盲)。</li>
+      <li>A 可作 A-2-3-4-5 的轮子(最小顺子)。</li>
+      <li>弃牌局不亮弃牌方的底牌;摊牌局双方亮牌。</li>
+    </ul>
+  `,
   rulesCloseBtn: '知道了,继续',
   gamePicker: {
     title: '选一个游戏开局',
@@ -117,6 +138,10 @@ const zh = {
     oldmaidTag: 'OLD MAID',
     oldmaidDesc: '开局整副牌里藏起一张,它的同点同伴就是鬼牌——先抽空手牌的人赢,最后剩着鬼牌的输。',
     oldmaidStart: '开局',
+    holdemTitle: '德州扑克',
+    holdemTag: "HOLD 'EM",
+    holdemDesc: '两人单挑:两张底牌加五张公共牌,限注单挑——庄位每手轮换,加注封顶,平局分池。',
+    holdemStart: '开局',
   },
   oldmaid: {
     yourTurn: '轮到你:点对方一张背面牌,把它抽走',
@@ -130,6 +155,49 @@ const zh = {
     hiddenReveal: (h: string) => `开局藏起的牌:${h}(它同点的落单牌就是鬼牌)`,
     historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · 弃 ${pairs} 对 · 藏 ${hidden}` : `${when} · 弃 ${pairs} 对`,
   },
+  holdem: {
+    potLabel: '底池',
+    blindsLabel: (sb: number, bb: number) => `盲注 ${sb}/${bb}`,
+    buttonBadge: '庄',
+    roundLabel: (round: number, phase: string) => `第 ${round} 手 · ${phase}`,
+    phaseName: { preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', runout: '发牌中', idle: '等下一手' },
+    yourTurn: '轮到你行动',
+    aiTurn: 'AI 行动中…(它已收到通知)',
+    dealing: '发牌中…',
+    aiThinkingTurn: (n: number) => `等 AI 行动(要跟 ${n})…`,
+    dealBtn: '发下一手',
+    dealFirst: '点「发下一手」开始(庄位自动下盲注)',
+    fold: '弃牌',
+    check: '过牌',
+    call: (n: number) => `跟注 ${n}`,
+    bet: '下注',
+    raiseTo: (n: number) => `加注到 ${n}`,
+    raiseView: (n: number) => `加注到 ${n}`,
+    betView: (n: number) => `下注 ${n}`,
+    minRaiseIs: (n: number) => `最小加到 ${n}`,
+    capIs: (n: number) => `单街封顶 ${n}`,
+    allinShort: '全押不足最小加注',
+    allin: '全押',
+    aiHoleShown: (cards: string) => `AI 底牌:${cards}`,
+    aiHoleHidden: (n: number) => `AI 底牌 ${n} 张(背面)`,
+    yourFolded: '你已弃牌',
+    aiFolded: 'AI 已弃牌',
+    winnerBanner: (winner: 'ai' | 'player' | 'split', pot: number) => winner === 'player' ? `你收下底池 ${pot}` : winner === 'ai' ? `AI 收下底池 ${pot}` : `平分底池 ${pot}`,
+    madeLine: (aiMade: string, playerMade: string) => `你 ${playerMade} · AI ${aiMade}`,
+    foldLine: '以弃牌结束,底牌不亮。',
+    historyLine: (when: string, round: number, winner: string, by: string, pot: number, delta: number) =>
+      `${when} · 第${round}手 ${winner}${by === 'fold' ? '(弃)' : '(摊)'} 底池 ${pot}`,
+  },
+  pokerMade: (cat: number, r: string[]): string =>
+    cat === 8 ? `同花顺(${r[0]} 高)`
+      : cat === 7 ? `四条 ${r[0]}`
+        : cat === 6 ? `葫芦(${r[0]} 带 ${r[1]})`
+          : cat === 5 ? `同花(${r[0]} 高)`
+            : cat === 4 ? `顺子(${r[0]} 高)`
+              : cat === 3 ? `三条 ${r[0]}`
+                : cat === 2 ? `两对 ${r[0]} 和 ${r[1]}`
+                  : cat === 1 ? `一对 ${r[0]}`
+                    : `高牌 ${r[0]}`,
 };
 
 export type PanelText = typeof zh;
@@ -234,6 +302,27 @@ const en: PanelText = {
       <li>The discards pile shows the latest pairs — reason about what the opponent still holds and where the Old Maid sits.</li>
     </ul>
   `,
+  rulesHoldemHtml: `
+    <h4>Starting a hand</h4>
+    <p>Tap "Start" → each hand begins with "Deal next hand": the button (swapped every hand) posts the small blind, the other side posts the big blind → two hole cards each → pre-flop betting → flop (3 cards) → betting → turn → betting → river → betting → showdown.</p>
+    <h4>Heads-up action order</h4>
+    <ul>
+      <li><b>Pre-flop:</b> the button (small blind) acts first; the big blind acts last and may check for free if nobody raised.</li>
+      <li><b>Post-flop:</b> the order flips — the big blind acts first and the button always acts last (the button's compensation).</li>
+    </ul>
+    <h4>Betting rules (capped table)</h4>
+    <ul>
+      <li>Actions: fold, check, call, bet, raise; each street is capped at the configured maximum stake.</li>
+      <li>Minimum raise = current bet + last raise size; a short stack may go all-in for less (no re-opening).</li>
+      <li>When a side is all-in the rest of the board is dealt and the hand goes to showdown — no more folds.</li>
+    </ul>
+    <h4>Comparing hands (best 5 of 7)</h4>
+    <ul>
+      <li>From the top: straight flush &gt; four of a kind &gt; full house &gt; flush &gt; straight &gt; three of a kind &gt; two pair &gt; one pair &gt; high card; ties split the pot (odd chip to the big blind).</li>
+      <li>An ace may also play low in A-2-3-4-5 (the wheel).</li>
+      <li>A folded hand is never revealed; both hands are shown at showdown.</li>
+    </ul>
+  `,
   rulesCloseBtn: 'Got it, continue',
   gamePicker: {
     title: 'Pick a game to start',
@@ -246,6 +335,10 @@ const en: PanelText = {
     oldmaidTag: '抽鬼牌',
     oldmaidDesc: 'One card is hidden from the full deck at the deal — its rank-mate is the Old Maid. Empty your hand first to win; last one holding it loses.',
     oldmaidStart: 'Start',
+    holdemTitle: "Texas Hold'em",
+    holdemTag: 'HEADS-UP',
+    holdemDesc: 'Two players, two hole cards and five community cards; capped-limit heads-up — the button swaps every hand, ties split the pot.',
+    holdemStart: 'Start',
   },
   oldmaid: {
     yourTurn: 'Your turn: click a face-down card to take it',
@@ -259,6 +352,49 @@ const en: PanelText = {
     hiddenReveal: (h: string) => `Hidden at the deal: ${h} (its rank-mate is the Old Maid)`,
     historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · ${pairs} pairs · hid ${hidden}` : `${when} · ${pairs} pairs`,
   },
+  holdem: {
+    potLabel: 'Pot',
+    blindsLabel: (sb: number, bb: number) => `Blinds ${sb}/${bb}`,
+    buttonBadge: 'D',
+    roundLabel: (round: number, phase: string) => `Hand ${round} · ${phase}`,
+    phaseName: { preflop: 'pre-flop', flop: 'flop', turn: 'turn', river: 'river', runout: 'dealing', idle: 'between hands' },
+    yourTurn: 'Your turn to act',
+    aiTurn: 'The AI is acting… (it has been notified)',
+    dealing: 'Dealing…',
+    aiThinkingTurn: (n: number) => `Waiting for the AI (to call ${n})…`,
+    dealBtn: 'Deal next hand',
+    dealFirst: 'Tap "Deal next hand" to begin (blinds post automatically)',
+    fold: 'Fold',
+    check: 'Check',
+    call: (n: number) => `Call ${n}`,
+    bet: 'Bet',
+    raiseTo: (n: number) => `Raise to ${n}`,
+    raiseView: (n: number) => `Raise to ${n}`,
+    betView: (n: number) => `Bet ${n}`,
+    minRaiseIs: (n: number) => `min raise to ${n}`,
+    capIs: (n: number) => `street cap ${n}`,
+    allinShort: 'all-in below min raise',
+    allin: 'All-in',
+    aiHoleShown: (cards: string) => `AI hole cards: ${cards}`,
+    aiHoleHidden: (n: number) => `AI hole cards: ${n} (face down)`,
+    yourFolded: 'You folded',
+    aiFolded: 'The AI folded',
+    winnerBanner: (winner: 'ai' | 'player' | 'split', pot: number) => winner === 'player' ? `You take the pot of ${pot}` : winner === 'ai' ? `The AI takes the pot of ${pot}` : `Split pot of ${pot}`,
+    madeLine: (aiMade: string, playerMade: string) => `You ${playerMade} · AI ${aiMade}`,
+    foldLine: 'Ended by a fold; the folded hand stays hidden.',
+    historyLine: (when: string, round: number, winner: string, by: string, pot: number, delta: number) =>
+      `${when} · Hand ${round} ${winner}${by === 'fold' ? ' (fold)' : ' (showdown)'} pot ${pot}`,
+  },
+  pokerMade: (cat: number, r: string[]): string =>
+    cat === 8 ? `straight flush (${r[0]} high)`
+      : cat === 7 ? `four of a kind, ${r[0]}s`
+        : cat === 6 ? `full house (${r[0]}s over ${r[1]}s)`
+          : cat === 5 ? `flush (${r[0]} high)`
+            : cat === 4 ? `straight (${r[0]} high)`
+              : cat === 3 ? `three of a kind, ${r[0]}s`
+                : cat === 2 ? `two pair, ${r[0]}s and ${r[1]}s`
+                  : cat === 1 ? `a pair of ${r[0]}s`
+                    : `high card ${r[0]}`,
 };
 
 export type PanelTables = { zh: PanelText; en: PanelText };
