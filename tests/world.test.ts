@@ -404,16 +404,52 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await world.stop();
   });
 
-  it('返回大厅:21 点进行中退出清桌,筹码无损', async () => {
+  it('返回大厅:21 点进行中退出改为挂起,筹码无损,再开时归档', async () => {
     const world = worldWith(zeroRng);
     await world.start(new FakeHost());
     await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
     await act(world, 'bet', { amount: 50 });
     const snap = await act(world, 'leave');
     expect(snap.game).toBeNull();
-    expect(snap.blackjack).toBeNull();
-    expect(snap.player.chips).toBe(1000); // 下注不动筹码,弃手即无损
+    expect(snap.player.chips).toBe(1000); // 下注不动筹码,挂起无损
     expect(snap.ai.chips).toBe(1000);
+    // 挂起的对局保留:快照标记 pausedGames,面板据此弹「继续/重新开始」。
+    expect(snap.pausedGames).toContain('blackjack');
+    // 直接再开(重新开始路径):先归档上一局。
+    const snap2 = await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    expect(snap2.game).toBe('blackjack');
+    expect((snap2 as unknown as { matches: unknown[] }).matches.length).toBe(1);
+    expect((snap2 as unknown as { pausedGames: string[] }).pausedGames).not.toContain('blackjack');
+    await world.stop();
+  });
+
+  it('继续上一局:leave 后 resume 恢复到离开时的状态', async () => {
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    await act(world, 'leave');
+    const snap = await act(world, 'resume', { game: 'blackjack' });
+    expect(snap.game).toBe('blackjack');
+    expect(snap.phase).toBe('playerActing');
+    expect((snap as unknown as { hands: Array<{ bet: number }> }).hands[0]!.bet).toBe(50);
+    // 无挂起的游戏不能 resume。
+    await act(world, 'leave');
+    await expect(act(world, 'resume', { game: 'holdem' })).rejects.toThrow();
+    await world.stop();
+  });
+
+  it('互不干涉:换开别的游戏不触动挂起的对局', async () => {
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'newgame', { game: 'blackjack', dealer: 'ai' });
+    await act(world, 'bet', { amount: 50 });
+    await act(world, 'leave'); // 21 点挂起
+    // 开德州(不同游戏):不弹提示、不归档 21 点。
+    const snap = await act(world, 'newgame', { game: 'holdem' });
+    expect(snap.game).toBe('holdem');
+    expect(snap.pausedGames).toContain('blackjack');
+    expect((snap as unknown as { matches: unknown[] }).matches.length).toBe(0);
     await world.stop();
   });
 

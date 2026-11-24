@@ -236,6 +236,9 @@ const zh = {
   errNewgameDealerArg: '庄家要写 ai 或 player。',
   errAINotWaiting: '现在没有在等 AI。',
   casinoInvite: '月下牌桌空着呢。主动邀请{{owner}}来玩一局:在聊天里自然地提起牌桌,提议玩 21 点、抽鬼牌或德州扑克之一,说说你为什么想玩这个;可以顺带提一句目前的战绩(筹码或胜场)。别自作主张开局,主人答应后等他自己在面板上选游戏,或询问他想玩哪个再等他点头。一次就好,别反复催。',
+  sessionArchived: (game: string, rounds: number, winnerLabel: string) => `主人在面板上选择不继续上一局,${game}的未完对局已作废归档(共 ${rounds} 手/局,按筹码算${winnerLabel});筹码不清零。这一局没什么好复盘的,主人重新开了新局。`,
+  statusPausedGames: (names: string) => `桌上还有没打完的对局:${names}。主人在面板上打开对应游戏时可以继续或重新开始。`,
+  errNothingToResume: '那个游戏没有可以继续的对局。',
   errUnknownActionPanel: (action: string) => `未知动作 ${action}。`,
 };
 
@@ -452,6 +455,9 @@ const en: ModelText = {
   errNewgameDealerArg: 'The dealer must be ai or player.',
   errAINotWaiting: 'The AI is not waiting for anything right now.',
   casinoInvite: 'The card table sits empty. Proactively invite {{owner}} for a game: bring it up naturally in chat, suggest one of blackjack, Old Maid or Texas Hold\'em, and say why you feel like it; mentioning the current score (chips or wins) is a nice touch. Do not start the game yourself — once they agree, wait for them to pick on the panel, or ask which one they want and wait for a yes. Ask once; do not nag.',
+  sessionArchived: (game, rounds, winnerLabel) => `The owner chose not to continue; the unfinished ${game} was voided and archived (${rounds} hand(s)/game(s), by chips ${winnerLabel}); chips were not reset. Nothing to review there — they started a fresh game.`,
+  statusPausedGames: (names) => `There are unfinished games on the table: ${names}. When the owner opens one on the panel they can continue it or start over.`,
+  errNothingToResume: 'There is no saved game to continue for that one.',
   errUnknownActionPanel: (action) => `Unknown action ${action}.`,
 };
 

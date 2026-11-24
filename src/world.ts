@@ -238,23 +238,7 @@ export class CasinoWorld implements World {
       this.save();
     }
     this.matches = loadMatches(this.opts.dataDir);
-    if (this.state.game === 'blackjack' && this.state.blackjack?.dealerActing) {
-      // 进程在庄家打牌途中重启:把这一手按规则打完再交给面板。
-      await this.dealerPlayAndSettle();
-    }
-    if (this.state.game === 'oldmaid' && this.state.oldmaid?.turnOwner === 'ai' && !this.state.oldmaid.winner) {
-      // 进程在 AI 抽牌回合重启:继续 AI 的回合。
-      await this.aiDrawsCard();
-    }
-    if (this.state.game === 'holdem' && this.state.holdem) {
-      // 进程在德州发牌/摊牌途中重启:把发牌打完;停在 AI 行动回合则叫它。
-      const h = this.state.holdem;
-      if (h.phase === 'runout') {
-        await this.holdemRunout();
-      } else if (!h.winner && h.phase !== 'idle' && h.toAct === 'ai') {
-        this.notifyHoldemTurn();
-      }
-    }
+    await this.resumeActiveGame();
     if (this.opts.cfg.proactiveInvite && this.state.game === null) {
       // AI 主动邀约:空桌挂载时让 AI 开口邀请主人玩一局。
       const mt = this.mt();
@@ -274,6 +258,82 @@ export class CasinoWorld implements World {
     for (const socket of this.sockets) socket.close('world stopped');
     this.sockets.clear();
     this.host = null;
+  }
+
+  /** 挂起的未完对局(面板据此弹「继续/重新开始」;抽鬼牌打完亮结果的不算;活动中的不算)。 */
+  private pausedGames(): Array<'blackjack' | 'oldmaid' | 'holdem'> {
+    const state = this.state!;
+    const paused: Array<'blackjack' | 'oldmaid' | 'holdem'> = [];
+    if (state.blackjack && state.game !== 'blackjack') paused.push('blackjack');
+    if (state.oldmaid && !state.oldmaid.winner && state.game !== 'oldmaid') paused.push('oldmaid');
+    if (state.holdem && state.game !== 'holdem') paused.push('holdem');
+    return paused;
+  }
+
+  /** 恢复当前活动对局:进程重启与面板「继续上一局」共用(把异步中段打完、给 AI 发回合通知)。 */
+  private async resumeActiveGame(): Promise<void> {
+    const state = this.state!;
+    if (state.game === 'blackjack' && state.blackjack) {
+      // 进程在庄家打牌途中重启:把这一手按规则打完再交给面板。
+      if (state.blackjack.dealerActing) await this.dealerPlayAndSettle();
+      // AI 是闲家:重启/续局后重新给它下注或保险的回合通知。
+      else if (state.blackjack.aiRole === 'player') {
+        if (state.blackjack.phase === 'betting') this.notifyBettingTurn();
+        else if (state.blackjack.phase === 'insurance') this.notifyInsuranceTurn();
+      }
+    }
+    if (state.game === 'oldmaid' && state.oldmaid?.turnOwner === 'ai' && !state.oldmaid.winner) {
+      // 进程在 AI 抽牌回合重启:继续 AI 的回合。
+      await this.aiDrawsCard();
+    }
+    if (state.game === 'holdem' && state.holdem) {
+      // 进程在德州发牌/摊牌途中重启:把发牌打完;停在 AI 行动回合则叫它。
+      const h = state.holdem;
+      if (h.phase === 'runout') {
+        await this.holdemRunout();
+      } else if (!h.winner && h.phase !== 'idle' && h.toAct === 'ai') {
+        this.notifyHoldemTurn();
+      }
+    }
+  }
+
+  /**
+   * 「重新开始」前的结算归档:未完对局作废(settle 模型下未划账的注额不动,
+   * 筹码不清零),按筹码把这场记进场次档案,只清该游戏的进度——其他游戏互不干涉。
+   */
+  private archiveSession(game: 'blackjack' | 'oldmaid' | 'holdem'): void {
+    const mt = this.mt();
+    const state = this.state!;
+    const bj = state.blackjack;
+    const om = state.oldmaid;
+    const hm = state.holdem;
+    const played = game === 'blackjack' && bj ? Math.max(0, bj.round - 1)
+      : game === 'holdem' && hm ? Math.max(0, hm.round - 1)
+        : game === 'oldmaid' && om ? om.score.ai + om.score.player : 0;
+    const winner: MatchRecord['winner'] =
+      state.ai.chips > state.player.chips ? 'ai' : state.player.chips > state.ai.chips ? 'player' : 'tie';
+    this.matches = [{
+      at: nowIso(this.opts.timezone),
+      rounds: played,
+      aiChips: state.ai.chips,
+      playerChips: state.player.chips,
+      aiNet: state.ai.net,
+      playerNet: state.player.net,
+      winner,
+    }, ...this.matches].slice(0, MATCHES_LIMIT);
+    saveMatches(this.opts.dataDir, this.matches);
+    if (game === 'blackjack') state.blackjack = null;
+    else if (game === 'oldmaid') state.oldmaid = null;
+    else state.holdem = null;
+    const gameName = game === 'blackjack' ? 'blackjack' : game === 'oldmaid' ? 'Old Maid' : 'Texas Hold\'em';
+    void this.host?.pushEvent({
+      type: 'casino.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: mt.sessionArchived(gameName, played, winner === 'ai' ? mt.matchYouWin : winner === 'player' ? mt.matchOwnerWins : mt.matchTie),
+    }, { trigger: 'flush' });
   }
 
   // ---------------------------------------------------------------- 工具
@@ -325,7 +385,11 @@ export class CasinoWorld implements World {
       return out.length ? out.join('\n') : mt.noHistoryYet;
     }
     if (state.game === null) {
-      return mt.statusNoGame;
+      const paused = this.pausedGames();
+      const prefix = paused.length
+        ? `${mt.statusPausedGames(paused.join(paused.length > 1 && readModelLanguage(this.opts.botDir) === 'en' ? ', ' : '、'))}\n`
+        : '';
+      return `${prefix}${mt.statusNoGame}`;
     }
     if (state.game === 'blackjack') {
       return this.toolBlackjackStatus(mt, state.blackjack!);
@@ -1400,6 +1464,8 @@ export class CasinoWorld implements World {
       const game = String(arg.game ?? '');
       if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);
       if (state.game !== null) throw new Error(mt.handNotFinished);
+      // 该游戏有挂起的未完对局(面板弹框里主人选了「重新开始」):先作废归档再开新局。
+      if (this.pausedGames().includes(game as 'blackjack' | 'oldmaid' | 'holdem')) this.archiveSession(game as 'blackjack' | 'oldmaid' | 'holdem');
       if (game === 'blackjack') {
         const dealer = String(arg.dealer ?? '');
         if (dealer !== 'ai' && dealer !== 'player') throw new Error(mt.errNewgameDealerArg);
@@ -1417,15 +1483,30 @@ export class CasinoWorld implements World {
       this.startOldMaid();
       return this.snapshot();
     }
+    if (action === 'resume') {
+      // 面板弹框「继续上一局」:把挂起的对局重新设为活动,恢复到离开时的样子。
+      const game = String(arg.game ?? '');
+      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);
+      if (state.game !== null) throw new Error(mt.handNotFinished);
+      const paused: Record<string, unknown | null> = {
+        blackjack: state.blackjack,
+        oldmaid: state.oldmaid && !state.oldmaid.winner ? state.oldmaid : null,
+        holdem: state.holdem,
+      };
+      if (!paused[game]) throw new Error(mt.errNothingToResume);
+      state.game = game as TableState['game'];
+      this.save();
+      this.broadcast();
+      await this.resumeActiveGame();
+      return this.snapshot();
+    }
     if (action === 'leave') {
-      // 返回大厅:弃掉当前对局。筹码在下注时不动、结算时才划账,未结算的手直接作废即无损。
+      // 返回大厅:对局挂起而非作废——再开同一游戏时面板会问「继续还是重新开始」。
+      // settle 模型下筹码全程未动账,挂起无损;异步中段(庄家打牌/发牌)不允许中途离开。
       if (state.game === null) return this.snapshot();
       if (state.blackjack?.dealerActing) throw new Error(mt.dealerTurnInProgress);
       if (state.holdem && state.holdem.phase === 'runout') throw new Error(mt.holdemDealing);
       state.game = null;
-      state.blackjack = null;
-      state.oldmaid = null;
-      state.holdem = null;
       this.save();
       this.broadcast();
       return this.snapshot();
@@ -1561,6 +1642,7 @@ export class CasinoWorld implements World {
     const base = {
       version: state.version,
       game: state.game,
+      pausedGames: this.pausedGames(),
       ai: seatView(state.ai),
       player: seatView(state.player),
       minBet: this.opts.cfg.minBet,

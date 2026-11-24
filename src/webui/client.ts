@@ -52,6 +52,8 @@ interface MatchView {
 interface Snapshot {
   version: number;
   game: 'blackjack' | 'oldmaid' | 'holdem' | null;
+  /** 有未完对局的游戏(打开时面板弹「继续/重新开始」)。 */
+  pausedGames?: Array<'blackjack' | 'oldmaid' | 'holdem'>;
   ai: SeatView;
   player: SeatView;
   minBet: number;
@@ -331,6 +333,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .game-name { font-size: 15px; font-weight: 800; letter-spacing: 1px; display: flex;
       align-items: baseline; gap: 7px; }
     .game-tag { font-size: 10px; font-weight: 700; letter-spacing: 2px; opacity: .55; }
+    .game-tag.paused { color: #e8c96a; opacity: 1; }
     .game-desc { font-size: 12px; opacity: .8; line-height: 1.55; margin: 4px 0 8px; }
     .game-card .btnrow { margin-top: 0; gap: 6px; }
     .game-card .btnrow button { padding: 5px 14px; font-size: 12px; flex: none; }
@@ -423,6 +426,35 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
 
     /** 大厅卡登记表:el 卡片元素,kw 过滤关键词(小写)。 */
     const lobbyEntries: Array<{ el: HTMLElement; kw: string[] }> = [];
+    const paused = state.pausedGames ?? [];
+
+    /** 打开某游戏:有挂起的未完对局时先弹「继续/重新开始」确认框,否则直接开局。 */
+    function openGame(game: 'blackjack' | 'oldmaid' | 'holdem', dealer?: 'ai' | 'player'): void {
+      if (!paused.includes(game)) {
+        void send(ctx, T, 'newgame', dealer ? { game, dealer } : { game });
+        return;
+      }
+      const title = game === 'blackjack' ? T.gamePicker.blackjackTitle
+        : game === 'oldmaid' ? T.gamePicker.oldmaidTitle : T.gamePicker.holdemTitle;
+      const overlay = el('div', 'rules-overlay');
+      const card = el('div', 'rules-card');
+      card.append(el('h4', undefined, `${title} · ${T.gamePicker.resumeTitle}`));
+      card.append(el('p', undefined, T.gamePicker.resumeText));
+      const row = el('div', 'btnrow');
+      const cont = el('button', 'primary', T.gamePicker.resumeContinue);
+      cont.type = 'button';
+      cont.addEventListener('click', () => void send(ctx, T, 'resume', { game }), { signal: ctx.signal });
+      const restart = el('button', undefined, T.gamePicker.resumeRestart);
+      restart.type = 'button';
+      restart.addEventListener('click', () => void send(ctx, T, 'newgame', dealer ? { game, dealer } : { game }), { signal: ctx.signal });
+      const cancel = el('button', undefined, T.gamePicker.resumeCancel);
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => { if (current) render(ctx, current); }, { signal: ctx.signal });
+      row.append(cont, restart, cancel);
+      card.append(row);
+      overlay.append(card);
+      wrap.append(overlay);
+    }
 
     // 21 点卡:♠A + ♥K 明牌装饰(blackjack 本义就是黑桃 A + J)
     const bjCard = el('div', 'game-card');
@@ -432,14 +464,15 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const bjInfo = el('div', 'game-info');
     const bjName = el('div', 'game-name');
     bjName.append(el('span', undefined, T.gamePicker.blackjackTitle), el('span', 'game-tag', T.gamePicker.blackjackTag));
+    if (paused.includes('blackjack')) bjName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
     bjInfo.append(bjName, el('div', 'game-desc', T.gamePicker.blackjackDesc));
     const bjBtns = el('div', 'btnrow');
     const bjAI = el('button', 'primary', T.gamePicker.blackjackAI);
     bjAI.type = 'button';
-    bjAI.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'blackjack', dealer: 'ai' }), { signal: ctx.signal });
+    bjAI.addEventListener('click', () => openGame('blackjack', 'ai'), { signal: ctx.signal });
     const bjMe = el('button', undefined, T.gamePicker.blackjackMe);
     bjMe.type = 'button';
-    bjMe.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'blackjack', dealer: 'player' }), { signal: ctx.signal });
+    bjMe.addEventListener('click', () => openGame('blackjack', 'player'), { signal: ctx.signal });
     bjBtns.append(bjAI, bjMe);
     bjInfo.append(bjBtns);
     bjCard.append(bjInfo);
@@ -458,11 +491,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const omInfo = el('div', 'game-info');
     const omName = el('div', 'game-name');
     omName.append(el('span', undefined, T.gamePicker.oldmaidTitle), el('span', 'game-tag', T.gamePicker.oldmaidTag));
+    if (paused.includes('oldmaid')) omName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
     omInfo.append(omName, el('div', 'game-desc', T.gamePicker.oldmaidDesc));
     const omBtns = el('div', 'btnrow');
     const omBtn = el('button', 'primary', T.gamePicker.oldmaidStart);
     omBtn.type = 'button';
-    omBtn.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'oldmaid' }), { signal: ctx.signal });
+    omBtn.addEventListener('click', () => openGame('oldmaid'), { signal: ctx.signal });
     omBtns.append(omBtn);
     omInfo.append(omBtns);
     omCard.append(omInfo);
@@ -481,11 +515,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const heInfo = el('div', 'game-info');
     const heName = el('div', 'game-name');
     heName.append(el('span', undefined, T.gamePicker.holdemTitle), el('span', 'game-tag', T.gamePicker.holdemTag));
+    if (paused.includes('holdem')) heName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
     heInfo.append(heName, el('div', 'game-desc', T.gamePicker.holdemDesc));
     const heBtns = el('div', 'btnrow');
     const heBtn = el('button', 'primary', T.gamePicker.holdemStart);
     heBtn.type = 'button';
-    heBtn.addEventListener('click', () => void send(ctx, T, 'newgame', { game: 'holdem' }), { signal: ctx.signal });
+    heBtn.addEventListener('click', () => openGame('holdem'), { signal: ctx.signal });
     heBtns.append(heBtn);
     heInfo.append(heBtns);
     heCard.append(heInfo);
