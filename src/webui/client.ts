@@ -145,12 +145,14 @@ function imgEl(url: string): HTMLImageElement {
   return img;
 }
 
-function cardEl(text: string, hidden = false): HTMLElement {
+function cardEl(text: string, hidden = false, anim?: { key: string; kind: 'deal' | 'flip' }): HTMLElement {
   const card = el('div', 'pcard');
   if (hidden) {
+    if (anim && !seenCards.has(anim.key)) { card.classList.add(anim.kind === 'flip' ? 'flip-in' : 'deal-in'); seenCards.add(anim.key); }
     card.append(imgEl(cardBackUrl));
     return card;
   }
+  if (anim && !seenCards.has(anim.key)) { card.classList.add(anim.kind === 'flip' ? 'flip-in' : 'deal-in'); seenCards.add(anim.key); }
   card.append(imgEl(cardFaceUrl));
   const suit = text.slice(0, 1);
   const rank = text.slice(1);
@@ -170,9 +172,64 @@ function chipsEl(label: string, amount: number, tone: string): HTMLElement {
   return box;
 }
 
-function statsLine(T: PanelText, seat: SeatView): string {
-  return T.stats(seat.wins, seat.losses, seat.pushes, seat.net);
+/** 把金额拆成最少枚的筹码面额组合(100/50/10;不足 10 的零头收进一枚散筹)。 */
+function chipBreakdown(amount: number): Array<{ v: number; tone: string }> {
+  const out: Array<{ v: number; tone: string }> = [];
+  let rest = Math.max(0, Math.floor(amount));
+  for (const [v, tone] of [[100, 'black'], [50, 'green'], [10, 'red']] as const) {
+    while (rest >= v) { out.push({ v, tone }); rest -= v; }
+  }
+  if (rest > 0) out.push({ v: rest, tone: 'dark' });
+  return out;
 }
+
+/** 场中的筹码堆:按面额叠成柱(一柱最多 8 枚,多了并排),牌桌视觉的核心。 */
+function chipStackEl(amount: number): HTMLElement {
+  const wrap = el('div', 'chipstack');
+  const chips = chipBreakdown(amount);
+  for (let col = 0; col < chips.length; col += 8) {
+    const column = el('div', 'chipcol');
+    for (const c of chips.slice(col, col + 8)) {
+      const chip = el('div', `chip chip-${c.tone}`, String(c.v));
+      chip.title = String(c.v);
+      column.append(chip);
+    }
+    wrap.append(column);
+  }
+  return wrap;
+}
+
+/** 净盈亏的彩色小徽章(盈绿/亏红/平灰)。 */
+function netBadge(net: number): HTMLElement {
+  return el('span', `net-badge ${net > 0 ? 'up' : net < 0 ? 'down' : 'flat'}`, `${net >= 0 ? '+' : ''}${net}`);
+}
+
+/** 座位统计:胜/负/平 + 彩色净盈亏徽章(替代纯文本 statsLine)。 */
+function statsEl(T: PanelText, seat: SeatView): HTMLElement {
+  const span = el('span', 'seatstats');
+  span.append(
+    el('span', undefined, T.statsWLP(seat.wins, seat.losses, seat.pushes)),
+    el('span', 'netwrap', `${T.netLabel} `),
+    netBadge(seat.net),
+  );
+  return span;
+}
+
+/** 浮层的 Esc 关闭:每次渲染重建绑定,避免监听器堆积。 */
+let escCleanup: (() => void) | null = null;
+function bindEsc(close: () => void): void {
+  escCleanup?.();
+  const handler = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', handler);
+  escCleanup = (): void => document.removeEventListener('keydown', handler);
+}
+
+/** 已播过进场动画的牌(跨快照记忆,保证动画只播一次,不随重渲染重播)。 */
+const seenCards = new Set<string>();
+/** 21 点庄家暗牌上一帧是否已亮(检测"翻开"的那一帧,好播翻牌动效)。 */
+let prevHoleRevealedBJ = false;
 
 function outcomePill(T: PanelText, outcome: string): HTMLElement {
   return el('span', `outcome-pill ${outcome}`, T.outcome[outcome] ?? outcome);
@@ -222,6 +279,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   const T = panelText(ctx.language);
   const root = ctx.root;
   root.replaceChildren();
+  escCleanup?.();
+  escCleanup = null;
 
   const style = el('style');
   style.textContent = `
@@ -237,7 +296,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       display: flex; align-items: flex-start; justify-content: center; padding: 16px; overflow: auto;
       border-radius: 12px; }
     .rules-card { background: #f7f3e6; color: #2c2820; border-radius: 12px; max-width: 470px; width: 100%;
-      padding: 14px 18px 12px; font-size: 13px; line-height: 1.55; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+      padding: 14px 18px 12px; font-size: 13px; line-height: 1.55; box-shadow: 0 6px 24px rgba(0,0,0,.5);
+      max-height: calc(100% - 4px); overflow-y: auto; }
     .rules-card h4 { margin: 10px 0 4px; font-size: 13px; color: #8a3030; }
     .rules-card h4:first-child { margin-top: 2px; }
     .rules-card ul { margin: 2px 0 2px 18px; padding: 0; }
@@ -350,7 +410,25 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .chipbox { text-align: center; font-size: 11px; }
     .chipbox-label { display: block; margin-bottom: 3px; opacity: .85; }
     .chip.chip-red { background: #b34355; } .chip.chip-blue { background: #3565a8; } .chip.chip-gold { background: #c8a44a; }
-    .chip.chip-green { background: #2c7a4b; } .chip.chip-black { background: #2a2822; }
+    .chip.chip-green { background: #2c7a4b; } .chip.chip-black { background: #2a2822; } .chip.chip-dark { background: #4c4636; }
+    /* 场中的筹码堆:按面额叠柱,上下重叠只露边,顶枚全显。 */
+    .chipstack { display: flex; gap: 7px; align-items: flex-end; }
+    .chipcol { display: flex; flex-direction: column-reverse; align-items: center; }
+    .chipcol .chip { width: 34px; height: 34px; font-size: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.5), inset 0 0 0 2px rgba(255,255,255,.3); }
+    .chipcol .chip + .chip { margin-bottom: -26px; }
+    .net-badge { display: inline-block; padding: 0 7px; border-radius: 999px; font-weight: 700; }
+    .net-badge.up { color: #9fe6bd; background: rgba(60,140,90,.28); }
+    .net-badge.down { color: #f0b9c4; background: rgba(160,60,80,.28); }
+    .net-badge.flat { opacity: .6; }
+    .netwrap { opacity: .7; }
+    .info-pill { display: inline-block; background: rgba(0,0,0,.32); border: 1px solid rgba(244,239,226,.25);
+      border-radius: 999px; padding: 1px 10px; font-size: 11px; margin: 0 3px 2px; }
+    /* 牌的进场动画:发牌滑入,翻牌绕 Y 轴亮面;系统开了"减少动态效果"则不播。 */
+    @keyframes dealIn { from { opacity: 0; transform: translateY(-16px) scale(.92); } to { opacity: 1; transform: none; } }
+    .pcard.deal-in { animation: dealIn .3s ease-out both; }
+    @keyframes flipIn { from { opacity: 0; transform: perspective(420px) rotateY(95deg); } to { opacity: 1; transform: perspective(420px) rotateY(0); } }
+    .pcard.flip-in { animation: flipIn .38s ease-out both; }
+    @media (prefers-reduced-motion: reduce) { .pcard.deal-in, .pcard.flip-in { animation: none; } }
     .history { margin-top: 12px; }
     .history-toggle { background: none; border: none; cursor: pointer; font-size: 13px; opacity: .75; padding: 2px 0; }
     .history-line { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; flex-wrap: wrap; align-items: center; }
@@ -358,6 +436,23 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .hidden { display: none; }
     .casino-error { color: #c0506a; font-size: 12px; min-height: 15px; margin-top: 6px; }
     .casino-idle { opacity: .5; font-size: 12px; padding: 2px 0; }
+    .betinput { width: 76px; text-align: center; background: rgba(0,0,0,.3); border: 1px solid rgba(244,239,226,.3);
+      border-radius: 999px; color: #f4efe2; font-size: 14px; font-weight: 700; padding: 6px 4px; font-family: inherit; }
+    .betinput:focus { outline: none; border-color: rgba(244,239,226,.65); }
+    /* 窄面板(<430px):牌面收小、游戏卡改纵排、留白收紧。 */
+    @media (max-width: 430px) {
+      .casino-wrap { max-width: 100%; }
+      .felt { padding: 10px 8px; border-width: 5px; }
+      .lobby { padding: 12px 10px; }
+      .game-card { flex-wrap: wrap; }
+      .lobby-cards { width: auto; }
+      .pcard { width: 44px; height: 62px; }
+      .game-card .pcard { width: 26px; height: 37px; }
+      .cards { min-height: 62px; }
+      .pot-inner { padding: 8px 10px; }
+      .btnrow button { padding: 9px 4px; }
+      .betinput { width: 64px; }
+    }
   `;
   root.append(style);
 
@@ -457,6 +552,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       card.append(row);
       overlay.append(card);
       wrap.append(overlay);
+      bindEsc(() => { if (current) render(ctx, current); });
     }
 
     // 21 点卡:♠A + ♥K 明牌装饰(blackjack 本义就是黑桃 A + J)
@@ -574,6 +670,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const dealerIsAi = bj.aiRole !== 'player';
     const dealerSeatView = bj.aiRole === 'player' ? state.player : state.ai;
     const playerSeatView = bj.aiRole === 'player' ? state.ai : state.player;
+    // 庄家暗牌翻开的那一帧:新亮的牌用翻牌动效,其余新牌用发牌动效。
+    const holeJustRevealed = bj.holeRevealed && !prevHoleRevealedBJ;
+    prevHoleRevealedBJ = bj.holeRevealed;
 
     const dealerSeat = el('div', 'seat');
     const dealerHead = el('div', 'seat-head');
@@ -584,8 +683,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     if (bj.phase !== 'betting' || bj.dealerCards.length === 0) {
       if (bj.dealerCards.length === 0) dealerCards.append(cardEl('', true));
     }
-    for (const text of bj.dealerCards) dealerCards.append(cardEl(text));
-    for (let i = 0; i < bj.holeCount; i++) dealerCards.append(cardEl('', true));
+    for (const [i, text] of bj.dealerCards.entries()) {
+      dealerCards.append(cardEl(text, false, { key: `bj-r${bj.round}-d${i}-${text}`, kind: holeJustRevealed ? 'flip' : 'deal' }));
+    }
+    for (let i = 0; i < bj.holeCount; i++) dealerCards.append(cardEl('', true, { key: `bj-r${bj.round}-dh${i}`, kind: 'deal' }));
     dealerSeat.append(dealerCards);
     if (bj.holeRevealed && bj.dealerTotal !== null) {
       dealerSeat.append(el('div', 'total-pill', `${T.roleDealer} ${bj.dealerTotal}`));
@@ -594,14 +695,17 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     }
     const dealerFoot = el('div', 'seat-head');
     dealerFoot.append(chipsEl(T.bank, dealerSeatView.chips, dealerIsAi ? 'blue' : 'gold'));
-    dealerFoot.append(el('span', 'seatstats', statsLine(T, dealerSeatView)));
+    dealerFoot.append(statsEl(T, dealerSeatView));
     dealerSeat.append(dealerFoot);
     felt.append(dealerSeat);
 
     const pot = el('div', 'pot');
     const potInner = el('div', 'pot-inner');
     potInner.append(el('div', undefined, T.potBet + (bj.insurance > 0 ? T.potWithInsurance(bj.insurance) : '')));
-    potInner.append(el('div', 'pot-num', String(bj.bet)));
+    const potNumRow = el('span', undefined);
+    potNumRow.append(el('span', 'pot-num', String(bj.bet)));
+    if (bj.bet > 0) potNumRow.append(chipStackEl(bj.bet));
+    potInner.append(potNumRow);
     pot.append(potInner);
     felt.append(pot);
 
@@ -612,8 +716,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     playerSeat.append(playerHead);
     const playerCards = el('div', 'cards');
     if (bj.hands.length === 0) playerCards.append(cardEl('', true));
-    for (const hand of bj.hands) {
-      for (const text of hand.cards) playerCards.append(cardEl(text));
+    for (const [h, hand] of bj.hands.entries()) {
+      for (const [i, text] of hand.cards.entries()) {
+        playerCards.append(cardEl(text, false, { key: `bj-r${bj.round}-p${h}-${i}-${text}`, kind: 'deal' }));
+      }
     }
     playerSeat.append(playerCards);
     const totals = bj.hands.map((hand) => hand.total).filter((n) => n !== null);
@@ -622,7 +728,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     }
     const playerFoot = el('div', 'seat-head');
     playerFoot.append(chipsEl(T.chips, playerSeatView.chips, dealerIsAi ? 'gold' : 'blue'));
-    playerFoot.append(el('span', 'seatstats', statsLine(T, playerSeatView)));
+    playerFoot.append(statsEl(T, playerSeatView));
     playerSeat.append(playerFoot);
     felt.append(playerSeat);
 
@@ -648,16 +754,35 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       const cap = Math.min(bj.maxBet, state.player.chips, state.ai.chips);
       ui.bet = Math.min(ui.bet, cap);
       const build = el('div', 'betbuild');
-      const view = el('span', 'betview', T.betView(ui.bet));
+      // 押注额:筹码按钮累加(保留)或数字输入(整数,精度 1);筹码堆按最少枚组合实时摆在旁边。
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.className = 'betinput';
+      input.value = String(ui.bet);
+      input.placeholder = '0';
+      const stackBox = el('div', 'chipstack-slot');
       const clear = el('button', undefined, T.clear);
       clear.type = 'button';
       const go = el('button', 'primary', T.goBet(cap));
       go.type = 'button';
-      const sync = (): void => {
-        view.textContent = T.betView(ui.bet);
+      const sync = (fromTyping = false): void => {
+        if (!fromTyping) input.value = String(ui.bet);
+        stackBox.replaceChildren(chipStackEl(ui.bet));
         clear.disabled = ui.bet === 0;
-        go.disabled = ui.bet < bj.minBet;
+        go.disabled = ui.bet < bj.minBet || ui.bet > cap;
       };
+      input.addEventListener('input', () => {
+        // 只留数字,精度 1 不许小数;上限在失焦/提交时钳,输入中只放宽到 cap。
+        const digits = input.value.replace(/\D+/g, '').slice(0, 6);
+        if (digits !== input.value) input.value = digits;
+        ui.bet = digits === '' ? 0 : Math.min(parseInt(digits, 10) || 0, cap);
+        sync(true);
+      }, { signal: ctx.signal });
+      input.addEventListener('blur', () => {
+        ui.bet = Math.min(ui.bet, cap);
+        sync();
+      }, { signal: ctx.signal });
       const add = (n: number): void => {
         ui.bet = Math.min(cap, ui.bet + n);
         sync();
@@ -672,7 +797,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         ui.bet = cap;
         sync();
       }, { signal: ctx.signal });
-      build.append(allin, view);
+      build.append(allin, el('span', 'casino-idle', T.betWord), input, stackBox);
       wrap.append(build);
       const row = el('div', 'btnrow');
       clear.addEventListener('click', () => {
@@ -783,28 +908,37 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     aiSeat.append(aiHead);
     const aiCardsRow = el('div', 'cards');
     if (he.revealHole && he.aiCards && he.aiCards.length) {
-      for (const text of he.aiCards) aiCardsRow.append(cardEl(text));
+      he.aiCards.forEach((text, i) => aiCardsRow.append(cardEl(text, false, { key: `he-r${he.round}-ai${i}-${text}`, kind: 'flip' })));
     } else {
       const n = Math.max(he.aiHoleCount, he.round > 0 ? 2 : 0);
-      for (let i = 0; i < n; i++) aiCardsRow.append(cardEl('', true));
+      for (let i = 0; i < n; i++) aiCardsRow.append(cardEl('', true, { key: `he-r${he.round}-ai-h${i}`, kind: 'deal' }));
     }
     aiSeat.append(aiCardsRow);
     aiSeat.append(el('div', 'total-pill', he.revealHole && he.aiCards?.length ? T.holdem.aiHoleShown(he.aiCards.join(' ')) : T.holdem.aiHoleHidden(Math.max(he.aiHoleCount, he.round > 0 ? 2 : 0))));
     const aiFoot = el('div', 'seat-head');
     aiFoot.append(chipsEl(T.chips, state.ai.chips, 'blue'));
-    aiFoot.append(el('span', 'seatstats', statsLine(T, state.ai)));
+    aiFoot.append(statsEl(T, state.ai));
     aiSeat.append(aiFoot);
     felt.append(aiSeat);
 
     // 中间:公共牌 + 底池
     const pot = el('div', 'pot');
     const potInner = el('div', 'pot-inner');
-    potInner.append(el('div', undefined, `${T.holdem.potLabel} · ${T.holdem.blindsLabel(he.blinds.sb, he.blinds.bb)} · ${T.holdem.capIs(he.streetCap)}`));
-    potInner.append(el('div', 'pot-num', String(he.pot)));
+    // 常驻参数徽章:盲注/封顶一目了然,不用回忆规则。
+    const badgeRow = el('div', undefined);
+    badgeRow.append(
+      el('span', 'info-pill', T.holdem.blindsLabel(he.blinds.sb, he.blinds.bb)),
+      el('span', 'info-pill', T.holdem.capIs(he.streetCap)),
+    );
+    potInner.append(badgeRow);
+    const potNumRow = el('div', undefined, `${T.holdem.potLabel} `);
+    potNumRow.append(el('span', 'pot-num', String(he.pot)));
+    if (he.pot > 0) potNumRow.append(chipStackEl(he.pot));
+    potInner.append(potNumRow);
     if (he.round > 0) potInner.append(el('div', undefined, T.holdem.roundLabel(he.round, phaseName)));
     const communityRow = el('div', 'cards');
     if (he.community.length) {
-      for (const text of he.community) communityRow.append(cardEl(text));
+      he.community.forEach((text, i) => communityRow.append(cardEl(text, false, { key: `he-c${he.round}-${i}-${text}`, kind: 'flip' })));
     } else {
       for (let i = 0; i < 5; i++) communityRow.append(cardEl('', true));
     }
@@ -820,7 +954,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     playerSeat.append(playerHead);
     const playerCardsRow = el('div', 'cards');
     if (he.playerCards.length) {
-      for (const text of he.playerCards) playerCardsRow.append(cardEl(text));
+      he.playerCards.forEach((text, i) => playerCardsRow.append(cardEl(text, false, { key: `he-r${he.round}-p${i}-${text}`, kind: 'deal' })));
     } else {
       playerCardsRow.append(cardEl('', true));
     }
@@ -828,7 +962,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     playerSeat.append(el('div', 'total-pill', `本手投入 ${he.playerCommitted} / 底池 ${he.pot}`));
     const playerFoot = el('div', 'seat-head');
     playerFoot.append(chipsEl(T.chips, state.player.chips, 'gold'));
-    playerFoot.append(el('span', 'seatstats', statsLine(T, state.player)));
+    playerFoot.append(statsEl(T, state.player));
     playerSeat.append(playerFoot);
     felt.append(playerSeat);
 
@@ -887,20 +1021,40 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         row.append(call);
       }
       wrap.append(row);
-      // 下注/加注构建器:筹码累加,目标额 = 本街投入到的总额;allinOnly 时锁定为全押额。
+      // 下注/加注构建器:筹码累加或数字输入,目标额 = 本街投入到的总额;allinOnly 时锁定为全押额。
       if (canFullRaise || allinOnly) {
         ui.bet = canFullRaise ? Math.min(Math.max(ui.bet, minTo), maxTo) : maxTo;
         const build = el('div', 'betbuild');
-        const view = el('span', 'betview', isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet));
+        const wordLabel = el('span', 'casino-idle', isBet ? T.holdem.betWord : T.holdem.raiseWord);
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.inputMode = 'numeric';
+        input.className = 'betinput';
+        input.value = String(ui.bet);
+        input.placeholder = '0';
+        const stackBox = el('div', 'chipstack-slot');
         const clear = el('button', undefined, T.clear);
         clear.type = 'button';
         const go = el('button', 'primary', isBet ? T.holdem.bet : T.holdem.raiseTo(ui.bet));
         go.type = 'button';
-        const sync = (): void => {
-          view.textContent = isBet ? T.holdem.betView(ui.bet) : T.holdem.raiseView(ui.bet);
+        const sync = (fromTyping = false): void => {
+          if (!fromTyping) input.value = String(ui.bet);
+          stackBox.replaceChildren(chipStackEl(ui.bet));
           clear.disabled = canFullRaise ? ui.bet <= minTo : true;
           go.disabled = canFullRaise ? (ui.bet < minTo || ui.bet > maxTo) : ui.bet !== maxTo;
+          go.textContent = isBet ? T.holdem.bet : T.holdem.raiseTo(ui.bet);
         };
+        input.addEventListener('input', () => {
+          // 只留数字,精度 1 不许小数;失焦时钳回合法区间,输入中只保留上限。
+          const digits = input.value.replace(/\D+/g, '').slice(0, 6);
+          if (digits !== input.value) input.value = digits;
+          ui.bet = digits === '' ? 0 : Math.min(parseInt(digits, 10) || 0, maxTo);
+          sync(true);
+        }, { signal: ctx.signal });
+        input.addEventListener('blur', () => {
+          ui.bet = canFullRaise ? Math.min(Math.max(ui.bet, minTo), maxTo) : maxTo;
+          sync();
+        }, { signal: ctx.signal });
         const add = (n: number): void => {
           ui.bet = Math.min(maxTo, ui.bet + n);
           sync();
@@ -915,7 +1069,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           ui.bet = maxTo;
           sync();
         }, { signal: ctx.signal });
-        build.append(allin, view, el('span', 'casino-idle', canFullRaise ? T.holdem.minRaiseIs(minTo) : T.holdem.allinOnlyHint(maxTo)));
+        build.append(allin, wordLabel, input, stackBox, el('span', 'casino-idle', canFullRaise ? T.holdem.minRaiseIs(minTo) : T.holdem.allinOnlyHint(maxTo)));
         wrap.append(build);
         clear.addEventListener('click', () => {
           ui.bet = minTo;
@@ -992,7 +1146,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const aiCards = el('div', 'cards');
     const canPick = !omEnded && omTurnOwner === 'player';
     for (let i = 0; i < omAiHandCount; i++) {
-      const back = cardEl('', true);
+      const back = cardEl('', true, { key: `om-g${omOldmaidHistory.length}-ai${i}`, kind: 'deal' });
       if (canPick) {
         back.classList.add('pickable');
         const idx = i;
@@ -1023,7 +1177,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     playerHead.append(el('span', undefined, T.me));
     playerSeat.append(playerHead);
     const playerCards = el('div', 'cards');
-    for (const text of omPlayerCards) playerCards.append(cardEl(text));
+    for (const text of omPlayerCards) playerCards.append(cardEl(text, false, { key: `om-g${omOldmaidHistory.length}-p${text}`, kind: 'deal' }));
     playerSeat.append(playerCards);
     playerSeat.append(el('div', 'total-pill', `${T.oldmaid.ownerHand(omPlayerHandCount)} · ${T.oldmaid.score(omScore.ai, omScore.player)}`));
     felt.append(playerSeat);
@@ -1130,9 +1284,15 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     wrap.append(matchBox);
   }
 
-  // ── 规则浮层(仅对局中;回大厅即收起) ──
+  // ── 规则浮层(仅对局中;回大厅即收起;Esc 可关) ──
   if (state.game === null) ui.rulesOpen = false;
-  if (ui.rulesOpen) wrap.append(buildRules(ctx, T, state.game));
+  if (ui.rulesOpen) {
+    wrap.append(buildRules(ctx, T, state.game));
+    bindEsc(() => {
+      ui.rulesOpen = false;
+      if (current) render(ctx, current);
+    });
+  }
 
   // ── 错误条 ──
   wrap.append(el('div', 'casino-error'));
