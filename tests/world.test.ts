@@ -600,6 +600,32 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
     await world.stop();
   });
 
+  it('德州:双方短筹码盲注全押,公共牌最大牌双方同牌,平分底池且奇数筹码归本手大盲', async () => {
+    // 牌靴:发牌序(庄位=玩家=小盲):玩家 ♦4 ♣5,AI ♥2 ♦3;公共牌 ♠A ♥K ♦Q ♣J ♥10。
+    // 双方都只能用公共牌的 A-K-Q-J-10 顺子 → 平分。底池 = 5(玩家小盲全押) + 8(AI 大盲全押) = 13,
+    // 一半 6 余 1:本手大盲是 AI,奇数筹码归 AI → AI 得 7、玩家得 6。
+    const used: Card[] = [
+      card(4, 2), card(2, 1), card(5, 3), card(3, 2),
+      card(1, 0), card(13, 1), card(12, 2), card(11, 3), card(10, 1),
+    ];
+    const rest: Card[] = [];
+    for (let suit = 0; suit < 4; suit++) {
+      for (let rank = 1; rank <= 13; rank++) {
+        if (!used.some((c) => c.rank === rank && c.suit === suit)) rest.push(card(rank, suit));
+      }
+    }
+    rigTable({ game: 'holdem', shoe: [...used, ...rest], aiChips: 8, playerChips: 5 });
+    const world = worldWith(zeroRng);
+    await world.start(new FakeHost());
+    await act(world, 'deal'); // 双方盲注阶段即全押,自动发完公共牌摊牌
+    const snap = await omState(world);
+    expect(snap.winner).toBe('split');
+    expect(snap.lastHoldem!.pot).toBe(13);
+    expect(snap.ai.chips).toBe(7);
+    expect(snap.player.chips).toBe(6);
+    await world.stop();
+  });
+
   it('德州:牌力评估(同花>葫芦、轮子顺子、7 选 5)', () => {
     // A 高同花 vs 葫芦:同花赢。
     const flush = bestPokerHand([card(1, 0), card(13, 0), card(12, 0), card(5, 0), card(3, 0), card(9, 2), card(9, 3)]);

@@ -1086,7 +1086,7 @@ export class CasinoWorld implements World {
       seat.folded = true;
       const line = await this.holdemSettle(other, 'fold', '', '');
       if (actor === 'player') this.notifyHoldemAction(mt.holdemActionFold(ownerLabel));
-      return { ok: true, text: actor === 'ai' ? line : line };
+      return { ok: true, text: line };
     }
     if (otherSeat.allIn && action !== 'call' && action !== 'fold') {
       return { ok: false, text: mt.holdemFacingAllIn };
@@ -1279,11 +1279,12 @@ export class CasinoWorld implements World {
       deltaAi = -h.ai.committed;
       deltaPlayer = h.ai.committed;
     } else {
-      // 平分底池;奇数筹码归本手大盲(即下手庄位的对面)。
+      // 平分底池;奇数筹码归本手大盲(标准规则:奇数筹码归按钮左侧,单挑时即大盲)。
       const half = Math.floor(pot / 2);
       const odd = pot - half * 2;
-      const aiShare = nextButton === 'player' ? half + odd : half;
-      const playerShare = nextButton === 'ai' ? half + odd : half;
+      const bbThisHand: 'ai' | 'player' = h.button === 'ai' ? 'player' : 'ai';
+      const aiShare = bbThisHand === 'ai' ? half + odd : half;
+      const playerShare = bbThisHand === 'player' ? half + odd : half;
       deltaAi = aiShare - h.ai.committed;
       deltaPlayer = playerShare - h.player.committed;
     }

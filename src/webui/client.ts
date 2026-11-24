@@ -227,7 +227,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .casino-title { font-weight: 700; font-size: 15px; }
     .casino-round { opacity: .7; font-size: 12px; }
     .rules-btn { border: 1px solid rgba(0,0,0,.25); background: #efe9d8; border-radius: 999px;
-      padding: 3px 12px; font-size: 12px; cursor: pointer; font-weight: 600; flex: none; }
+      padding: 3px 12px; font-size: 12px; cursor: pointer; font-weight: 600; flex: none;
+      color: #26200e; }
     .rules-overlay { position: absolute; inset: 0; background: rgba(8,12,9,.74); z-index: 6;
       display: flex; align-items: flex-start; justify-content: center; padding: 16px; overflow: auto;
       border-radius: 12px; }
