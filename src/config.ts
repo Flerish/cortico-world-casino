@@ -28,6 +28,12 @@ export interface CasinoConfigSection {
   starpostToken: string;
   /** 星邮轮询间隔毫秒(收件箱增量检查),0 = 关闭自动轮询,只手动查。 */
   starpostPollMs: number;
+  /** 联机对局:每两局之间的间隔毫秒(防止 AI 连续对战消耗过大)。 */
+  onlineGapMs: number;
+  /** 联机对局:连续打满多少手后进入长休。 */
+  onlineRestAfterHands: number;
+  /** 联机对局:长休时长毫秒,休完自动询问双方是否继续。 */
+  onlineRestMs: number;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -44,6 +50,9 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   starpostBotId: '',
   starpostToken: '',
   starpostPollMs: 60000,
+  onlineGapMs: 10000,
+  onlineRestAfterHands: 10,
+  onlineRestMs: 300000,
 };
 
 const TEXT = {
@@ -61,6 +70,9 @@ const TEXT = {
     starpostBotId: { title: '星邮 botId', description: '星邮 bot 的数字 ID(5–12 位)。可与星邮扩展同号,但独立账号更稳。' },
     starpostToken: { title: '星邮令牌', description: '该 bot 账号的凭据 token(24–128 字符)。属敏感信息,仅存部署配置。' },
     starpostPollMs: { title: '星邮轮询间隔(毫秒)', description: '收件箱增量检查频率;0 = 不自动轮询,仅手动查看。' },
+    onlineGapMs: { title: '联机局间间隔(毫秒)', description: 'AI 对战时每两局之间的停顿,默认 10 秒;0 = 不停顿(不建议)。' },
+    onlineRestAfterHands: { title: '联机长休手数', description: '连续打满这么多手后进入长休;0 = 不自动长休。' },
+    onlineRestMs: { title: '联机长休时长(毫秒)', description: '长休持续的时间,休完自动继续;默认 5 分钟。' },
   },
   en: {
     title: 'Moonlit Table',
@@ -76,6 +88,9 @@ const TEXT = {
     starpostBotId: { title: 'Starpost botId', description: 'The bot\'s numeric Starpost ID (5–12 digits). May share the starpost extension\'s account; a separate one is safer.' },
     starpostToken: { title: 'Starpost token', description: 'That bot account\'s credential token (24–128 chars). Sensitive — keep it in deployment config only.' },
     starpostPollMs: { title: 'Starpost polling (ms)', description: 'How often the inbox is checked for new messages; 0 = no auto-polling, manual checks only.' },
+    onlineGapMs: { title: 'Online inter-hand gap (ms)', description: 'Pause between hands during AI-vs-AI play, default 10s; 0 = no pause (not recommended).' },
+    onlineRestAfterHands: { title: 'Online hands before rest', description: 'After this many consecutive hands the session takes a long break; 0 = never.' },
+    onlineRestMs: { title: 'Online rest duration (ms)', description: 'How long the long break lasts before resuming; default 5 minutes.' },
   },
 } as const;
 
@@ -171,6 +186,30 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           description: t.starpostPollMs.description,
           minimum: 0,
           maximum: 600000,
+          'x-hot': true,
+        },
+        'worlds.casino.onlineGapMs': {
+          type: 'number',
+          title: t.onlineGapMs.title,
+          description: t.onlineGapMs.description,
+          minimum: 0,
+          maximum: 600000,
+          'x-hot': true,
+        },
+        'worlds.casino.onlineRestAfterHands': {
+          type: 'number',
+          title: t.onlineRestAfterHands.title,
+          description: t.onlineRestAfterHands.description,
+          minimum: 0,
+          maximum: 1000,
+          'x-hot': true,
+        },
+        'worlds.casino.onlineRestMs': {
+          type: 'number',
+          title: t.onlineRestMs.title,
+          description: t.onlineRestMs.description,
+          minimum: 1000,
+          maximum: 3600000,
           'x-hot': true,
         },
       },

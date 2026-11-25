@@ -3,33 +3,73 @@ export type OnlineGame = 'blackjack' | 'oldmaid' | 'holdem';
 export const ONLINE_GAMES: readonly OnlineGame[] = ['blackjack', 'oldmaid', 'holdem'];
 export const ONLINE_PREFIX = '@casino';
 
-export type OnlineAction = 'invite' | 'accept' | 'decline';
+/** 协议动作全集;解析时按动作严格校验参数形态。 */
+export const ONLINE_ACTIONS = [
+  'invite', 'accept', 'decline',
+  'start', 'hand', 'state', 'act', 'settle', 'handoff', 'rest', 'stop', 'reject',
+] as const;
+export type OnlineAction = (typeof ONLINE_ACTIONS)[number];
+
 export interface OnlineMessage {
   action: OnlineAction;
-  /** invite/accept/decline 携带的游戏名;decline 可省略。 */
+  /** 首个裸词恰为游戏名时填充(invite/start/accept/decline)。 */
   game: OnlineGame | null;
+  /** 动作后的全部裸词(act: 动作词+金额;invite/start: 游戏名)。 */
+  tokens: string[];
+  /** key=value 形式的参数(state/settle/handoff/rest/stop/reject)。 */
+  kv: Record<string, string>;
 }
 
-/** 解析 @casino 协议消息;非协议消息或格式不合法返回 null(调用方按普通聊天处理)。 */
+/** 解析 @casino 协议消息;非协议消息、未知动作或参数形态不合法返回 null(按普通聊天处理)。 */
 export function parseOnlineMessage(text: string): OnlineMessage | null {
   const line = String(text ?? '').trim();
   if (!line.startsWith(ONLINE_PREFIX)) return null;
   const tokens = line.slice(ONLINE_PREFIX.length).trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return null;
   const action = tokens[0]!.toLowerCase() as OnlineAction;
-  if (action !== 'invite' && action !== 'accept' && action !== 'decline') return null;
-  let game: OnlineGame | null = null;
-  if (tokens[1]) {
-    const candidate = tokens[1]!.toLowerCase() as OnlineGame;
-    if (!ONLINE_GAMES.includes(candidate)) return null;
-    game = candidate;
+  if (!ONLINE_ACTIONS.includes(action)) return null;
+  const rest = tokens.slice(1);
+  const kv: Record<string, string> = {};
+  const bare: string[] = [];
+  for (const t of rest) {
+    const eq = t.indexOf('=');
+    if (eq > 0) { kv[t.slice(0, eq)] = t.slice(eq + 1); continue; }
+    bare.push(t);
   }
-  return { action, game };
+  const game = bare[0] && ONLINE_GAMES.includes(bare[0] as OnlineGame) ? (bare[0] as OnlineGame) : null;
+  // 按动作严格校验;任何形态不符都视为普通聊天(协议通道不接受含糊输入)。
+  if (action === 'invite' || action === 'start') {
+    if (!game || bare.length !== 1) return null; // start 允许携带 kv 筹码账本
+  } else if (action === 'accept' || action === 'decline') {
+    if (bare.length > 1 || Object.keys(kv).length) return null;
+    if (bare.length === 1 && !game) return null;
+  } else if (action === 'act') {
+    if (!bare.length) return null;
+    if (!['bet', 'hit', 'stand', 'double'].includes(bare[0]!)) return null;
+    if (bare[0] === 'bet' && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
+    if (bare[0] !== 'bet' && bare.length !== 1) return null;
+  } else if (action === 'hand') {
+    if (bare.length || Object.keys(kv).length) return null; // hand 无参数
+  } else if (action === 'state') {
+    if (bare.length || !Object.keys(kv).length) return null; // state 只收 key=value 参数
+  } else {
+    // settle / handoff / rest / stop / reject:只收 key=value 参数
+    if (bare.length) return null;
+    if (action === 'rest' && !/^\d+$/.test(kv.minutes ?? '')) return null;
+    if (action === 'settle' && !/^(player|bank|push)$/.test(kv.result ?? '')) return null;
+    if (action === 'handoff' && !/^[\d]+:[\d]+,[\d]+:[\d]+$/.test(kv.chips ?? '')) return null;
+  }
+  return { action, game, tokens: bare.length ? bare : rest, kv };
 }
 
-/** 组装协议消息。 */
-export function composeOnlineMessage(action: OnlineAction, game?: OnlineGame | null): string {
-  return game ? `${ONLINE_PREFIX} ${action} ${game}` : `${ONLINE_PREFIX} ${action}`;
+/** 组装协议消息行:onlineLine('state', ['total=14', ...]) → '@casino state total=14 ...'。 */
+export function onlineLine(action: OnlineAction, parts: string[] = []): string {
+  return [ONLINE_PREFIX, action, ...parts].join(' ');
+}
+
+/** 邀约意向消息(invite/accept/decline,游戏名为首个参数)。 */
+export function composeOnlineMessage(action: 'invite' | 'accept' | 'decline', game?: OnlineGame | null): string {
+  return onlineLine(action, game ? [game] : []);
 }
 
 /** 邀约记录(内存态,重启即失效——联机会话本就不该跨重启保留)。 */

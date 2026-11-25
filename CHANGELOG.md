@@ -2,6 +2,15 @@
 
 ## 未发布
 
+- **联机对局引擎(阶段 B,主人指示庄家轮流)**:`src/remote-blackjack.ts`——庄家端权威
+  21 点引擎(bank/player 语义,自然黑杰克 1.5 倍、加倍、庄家按规则补牌);`@casino` 协议
+  扩展至全对局生命周期(start/hand/state/act/settle/handoff/rest/stop/reject,按动作严格
+  校验参数形态);会话筹码账本按 botId 记(与本地筹码独立);**庄家权威端每手轮换**——
+  结算后原庄家发 handoff 交出引擎,对方建引擎开新手(响应主人"坐庄轮流来"的要求);
+  节奏护栏:`onlineGapMs`(局间 10s)/`onlineRestAfterHands`+`onlineRestMs`(连 N 手长休,
+  默认 10 手休 5 分钟);casino_online 工具新增 act/stop/state;联机处理器全链路 async
+  串行化(消除发送竞态);双 world 联机对局测试(假网络桥接两实例全流程:邀约→接受→
+  下注→行动→结算→轮换→终止)。46/46 测试。
 - 星邮客户端(联机预埋,第一阶段):新增 `src/starpost-client.ts` 轻量协议层(POST /rpc、
   Bearer token + x-starpost-id 认证、snapshot/inbox.peek/chat.history/message.send/friend,
   传输可注入便于测试);配置新增 `starpostEnabled/starpostServer/starpostBotId/

@@ -25,7 +25,8 @@ import {
 } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
 import { StarpostClient, type StarpostMessage } from './starpost-client.ts';
-import { parseOnlineMessage, composeOnlineMessage, ONLINE_GAMES, type OnlineGame, type OnlineInvite } from './online-protocol.ts';
+import { parseOnlineMessage, onlineLine, composeOnlineMessage, ONLINE_GAMES, type OnlineGame, type OnlineInvite, type OnlineMessage } from './online-protocol.ts';
+import { RemoteBlackjack } from './remote-blackjack.ts';
 import { modelText, readModelLanguage, readOwnerLabel, type ModelText } from './model-text.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
@@ -84,6 +85,8 @@ export interface CasinoWorldOptions {
   rng?: () => number;
   /** 可注入的星邮传输(测试替身);缺省用全局 fetch 直连服务器。 */
   starpostPost?: (url: string, body: unknown, headers?: Record<string, string>, timeoutMs?: number) => Promise<{ status: number; body: any }>;
+  /** 可注入的联机引擎初始牌序(测试定牌)。 */
+  starpostEngineDeck?: Card[];
 }
 
 /** 一次操作的结果:ok=false 时 text 是给界面或模型的拒绝理由。 */
@@ -158,15 +161,17 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'casino_online',
     description:
-      'Online-play invitations over Starpost (requires the Starpost client to be ready). Actions: "invite" (challenge a friend to a game; target = friend botId, game = blackjack/oldmaid/holdem), "accept" or "decline" (respond to an incoming invitation; target = inviter botId), "list" (all invitation records with statuses). Sending and answering invites exchanges @casino protocol messages; a future phase will start real cross-machine games after intent is confirmed.',
+      'Online play over Starpost (requires the Starpost client ready). Actions: "invite" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter\'s machine becomes the host), "accept"/"decline" (respond to an incoming invitation), "act" (in a session: bet with amount / hit / stand / double — send when an online_state event says it is your turn), "stop" (end the session; chips settle as-is), "state" (session summary), "list". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.',
     tags: ['write'],
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        action: { type: 'string', enum: ['invite', 'accept', 'decline', 'list'], description: 'What to do.' },
-        target: { type: 'string', description: 'The friend botId to invite or respond to.' },
-        game: { type: 'string', enum: ['blackjack', 'oldmaid', 'holdem'], description: 'invite: which game to play.' },
+        action: { type: 'string', enum: ['invite', 'accept', 'decline', 'act', 'stop', 'state', 'list'], description: 'What to do.' },
+        target: { type: 'string', description: 'invite/accept/decline: the friend botId.' },
+        game: { type: 'string', enum: ['blackjack', 'oldmaid', 'holdem'], description: 'invite: which game.' },
+        act: { type: 'string', enum: ['bet', 'hit', 'stand', 'double'], description: 'act: which move (only when an online_state event asks for it).' },
+        amount: { type: 'number', description: 'act=bet: the stake.' },
       },
       required: ['action'],
     },
@@ -199,6 +204,16 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   },
 ];
 
+export interface OnlineSessionShape {
+  game: OnlineGame;
+  peer: string;
+  chips: Record<string, number>;
+  bank: string;
+  engine: RemoteBlackjack | null;
+  timers: Array<ReturnType<typeof setTimeout>>;
+  handsTotal: number;
+}
+
 export class CasinoWorld implements World {
   readonly id = 'casino';
   private host: WorldHost | null = null;
@@ -213,9 +228,11 @@ export class CasinoWorld implements World {
     lastError: string | null;
     lastPollAt: string | null;
     lastQuota: unknown;
-    /** @casino 联机邀约记录(内存态,重启即失效)。 */
-    invites: OnlineInvite[];
-  } | null = null;
+  /** @casino 联机邀约记录(内存态,重启即失效)。 */
+  invites: OnlineInvite[];
+  /** 联机会话:accept 互认后由邀约发起方(首任庄家)创建;权威端(引擎持有者)每手轮换,筹码账本按 botId 记。 */
+  session: OnlineSessionShape | null;
+} | null = null;
 
   constructor(private readonly opts: CasinoWorldOptions) {}
 
@@ -320,7 +337,7 @@ export class CasinoWorld implements World {
         { serverUrl: cfg.starpostServer, botId: cfg.starpostBotId, token: cfg.starpostToken },
         { post: this.opts.starpostPost },
       );
-      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[] };
+      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[], session: null };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
       void client.snapshot(true)
@@ -332,7 +349,7 @@ export class CasinoWorld implements World {
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
-      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [] };
+      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null };
     }
   }
 
@@ -351,7 +368,7 @@ export class CasinoWorld implements World {
           // @casino 协议消息(仅私聊参与):路由进联机会话,不当聊天投递。
           if (conv.kind === 'private') {
             const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
-            if (protocol) { this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }
+            if (protocol) { await this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }
           }
           const nickname = msg.senderNickname ? `(${msg.senderNickname})` : '';
           void this.host?.pushEvent({
@@ -383,81 +400,245 @@ export class CasinoWorld implements World {
     if (sp.invites.length > 20) sp.invites.length = 20;
   }
 
-  /** 处理 @casino 协议消息:更新邀约状态并推对应事件;未匹配的静默忽略。 */
-  private handleOnlineMessage(peer: string, msg: { action: 'invite' | 'accept' | 'decline'; game: OnlineGame | null }, at: string): void {
+  /** 联机私信发送(会话内使用)。 */
+  private async onlineSend(peer: string, line: string): Promise<void> {
+    await this.starpost!.client.sendPrivate(peer, line);
+  }
+
+  /** 联机事件推送。 */
+  private onlineEvent(type: string, peer: string, text: string, at: string): void {
+    void this.host?.pushEvent({
+      type, ts: at, source: this.id, origin: 'external', senderKey: `starpost.private.${peer}`, text,
+    }, { trigger: 'flush' });
+  }
+
+  /** 关闭会话(双方通用):清定时器、清状态、推事件;notifyPeer=true 时通知对方。 */
+  private async closeOnlineSession(reason: string, notifyPeer = false): Promise<void> {
     const sp = this.starpost!;
-    const push = (type: string, text: string): void => {
-      void this.host?.pushEvent({
-        type, ts: at, source: this.id, origin: 'external', senderKey: `starpost.private.${peer}`, text,
-      }, { trigger: 'flush' });
-    };
+    const session = sp.session;
+    if (!session) return;
+    for (const t of session.timers) clearTimeout(t);
+    if (notifyPeer) {
+      await this.onlineSend(session.peer, onlineLine('stop', [`reason=${encodeURIComponent(reason)}`])).catch(() => {});
+    }
+    sp.session = null;
+    this.onlineEvent('casino.online_session', session.peer, `[星邮联机] ${session.game} 会话结束(${reason})。牌桌回到本地模式。`, nowIso(this.opts.timezone));
+  }
+
+  /** 庄家(权威端):开新手——发 hand 请客座下注,并推本地事件。 */
+  private async bankDealHand(): Promise<void> {
+    const sp = this.starpost!;
+    const session = sp.session!;
+    if (!session.engine) return;
+    await this.onlineSend(session.peer, onlineLine('hand')).catch((e) => { sp.lastError = (e as Error).message; });
+    this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一手开始,已请 ${session.peer} 下注(会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]})。`, nowIso(this.opts.timezone));
+  }
+
+  /** 庄家:节奏调度——按 gapMs 间隔安排下一手;连满 restAfterHands 手先长休。庄家每手轮换。 */
+  private bankScheduleNext(): void {
+    const sp = this.starpost!;
+    const session = sp.session!;
+    const cfg = this.opts.cfg;
+    const gap = Math.max(0, Math.floor(Number(cfg.onlineGapMs) || 0));
+    const restAfter = Math.max(0, Math.floor(Number(cfg.onlineRestAfterHands) || 0));
+    const restMs = Math.max(1000, Math.floor(Number(cfg.onlineRestMs) || 300000));
+    const at = nowIso(this.opts.timezone);
+    if (restAfter > 0 && session.handsTotal % restAfter === 0 && session.handsTotal > 0) {
+      const minutes = Math.round(restMs / 60000);
+      void this.onlineSend(session.peer, onlineLine('rest', [`minutes=${minutes}`]));
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 已连续 ${session.handsTotal} 手,进入 ${minutes} 分钟休息(防止消耗过大,到点自动换庄继续)。`, at);
+      session.timers.push(setTimeout(() => { if (sp.session === session) void this.bankHandoff(); }, restMs));
+      return;
+    }
+    session.timers.push(setTimeout(() => { if (sp.session === session) void this.bankHandoff(); }, gap));
+  }
+
+  /** 庄家轮换:原庄家发 handoff(带筹码账本),双方交换权威端;新庄家开新手。 */
+  private async bankHandoff(): Promise<void> {
+    const sp = this.starpost!;
+    const session = sp.session!;
+    if (!session.engine) return;
+    const myId = this.myBotId();
+    const chipsPart = `chips=${myId}:${session.chips[myId]},${session.peer}:${session.chips[session.peer]}`;
+    const handsPart = `hands=${session.handsTotal}`;
+    session.engine = null;           // 我交出权威端,变为客座
+    session.bank = session.peer;     // 对方坐庄
+    await this.onlineSend(session.peer, onlineLine('handoff', [chipsPart, handsPart])).catch((e) => { sp.lastError = (e as Error).message; });
+    this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 一手结束,庄家轮换:接下来由 ${session.peer} 坐庄(共 ${session.handsTotal} 手)。`, nowIso(this.opts.timezone));
+  }
+
+  /** 庄家:处理客座动作(bet/hit/stand/double),推进引擎并回发 state/settle。 */
+  private async bankApplyAct(tokens: string[]): Promise<void> {
+    const sp = this.starpost!;
+    const session = sp.session!;
+    const engine = session.engine;
+    if (!engine) { void this.onlineSend(session.peer, onlineLine('reject', ['reason=no_engine'])); return; }
+    const at = nowIso(this.opts.timezone);
+    const act = (tokens[0] ?? '').toLowerCase();
+    try {
+      if (act === 'bet') {
+        if (engine.phase !== 'awaitBet') throw new Error('现在不是下注时机');
+        const bet = Math.floor(Number(tokens[1]));
+        const err = engine.betError(bet);
+        if (err) throw new Error(err);
+        engine.startHand(bet);
+        const phaseNow: 'player' | 'dealer' | 'done' = engine.phase as 'player' | 'dealer' | 'done';
+        if (phaseNow === 'done') { await this.bankFinishHand(session, engine, at); return; } // 自然黑杰克立即结算
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+        this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方押注 ${engine.bet}。${engine.handDetail()}`, at);
+        return;
+      }
+      if (engine.phase === 'awaitBet' || !engine.hand) throw new Error('等待对方下注中');
+      if (act === 'hit') engine.hit();
+      else if (act === 'stand') engine.stand();
+      else if (act === 'double') engine.double();
+      else throw new Error(`未知动作 ${act}(可用 bet/hit/stand/double)`);
+      if (engine.phase === 'player') {
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+        this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方行动后:${engine.handDetail()}`, at);
+        return;
+      }
+      // 庄家打完已结算:写回筹码账本,发 settle,推本地结果,按节奏安排庄家轮换。
+      await this.bankFinishHand(session, engine, at);
+    } catch (error) {
+      await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent((error as Error).message)}`])).catch(() => {});
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方动作被拒:${(error as Error).message}`, at);
+    }
+  }
+
+  /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
+  /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
+  private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack, at: string): Promise<void> {
+    session.chips[session.bank] = engine.chips.bank;
+    session.chips[session.peer] = engine.chips.player;
+    await this.onlineSend(session.peer, onlineLine('settle', engine.settleParts()));
+    const s2 = engine.lastSettle!;
+    const bankIsMe = session.bank === this.myBotId();
+    const myDelta = bankIsMe ? (s2.winner === 'bank' ? -s2.delta : s2.winner === 'player' ? s2.delta : 0) : (s2.winner === 'player' ? -s2.delta : s2.winner === 'bank' ? s2.delta : 0);
+    const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'player') === bankIsMe ? '我赢' : '我输');
+    this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
+    session.handsTotal++;
+    this.bankScheduleNext();
+  }
+  private myBotId(): string { return this.starpost!.client.botId; }
+
+  /** 处理 @casino 协议消息:按角色与动作路由;未匹配的静默忽略。 */
+  private async handleOnlineMessage(peer: string, msg: OnlineMessage, at: string): Promise<void> {
+    const sp = this.starpost!;
+    const session = sp.session;
+    const push = (type: string, text: string): void => this.onlineEvent(type, peer, text, at);
+
+    console.log(JSON.stringify({ dbg: msg.action, peer, kv: msg.kv, session: session ? session.bank : null }));
+    // —— 意向层(不受会话状态限制,但会话进行中忽略新邀约) ——
     if (msg.action === 'invite') {
+      if (session) return;
       const game = msg.game ?? 'blackjack';
       const pending = sp.invites.some((i) => i.direction === 'in' && i.peer === peer && i.game === game && i.status === 'pending');
       this.trackInvite({ direction: 'in', peer, game, at, status: 'pending' });
-      if (!pending) push('casino.online_invite', `[星邮联机] ${peer} 邀请你玩一局 ${game}。用 casino_online 的 accept/decline(action + target)回应;开局流程在下一阶段提供,现阶段仅交换意向。`);
+      if (!pending) push('casino.online_invite', `[星邮联机] ${peer} 邀请你玩一局 ${game}。用 casino_online 的 accept/decline 回应;接受后由对方(庄家)开局。`);
       return;
     }
     if (msg.action === 'accept') {
       const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
-      if (!target) return; // 没有待应答的邀约,静默
+      if (!target) return;
       target.status = 'accepted';
-      push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。对局引擎在下一阶段接入,现阶段仅确认意向。`);
+      // 我是庄家(邀约发出方):创建会话、筹码账本与引擎,开局。
+      const startChips = this.opts.cfg.startChips;
+      const myId = this.myBotId();
+      const engine = new RemoteBlackjack({
+        bankChips: startChips, playerChips: startChips,
+        minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
+        dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
+        deck: this.opts.starpostEngineDeck,
+      });
+      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0 };
+      await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
+      push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
+      push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
+      this.bankDealHand();
       return;
     }
-    // decline
-    const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
-    if (!target) return;
-    target.status = 'declined';
-    push('casino.online_declined', `[星邮联机] ${peer} 婉拒了你的${target.game}邀约。`);
-  }
+    if (msg.action === 'decline') {
+      const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
+      if (!target) return;
+      target.status = 'declined';
+      push('casino.online_declined', `[星邮联机] ${peer} 婉拒了你的${target.game}邀约。`);
+      return;
+    }
 
-  /** 联机工具:invite/accept/decline/list。依赖星邮客户端就绪。 */
-  private async toolOnline(args: Record<string, unknown>): Promise<string> {
-    const sp = this.starpost;
-    if (!sp?.client) return JSON.stringify({ error: '星邮客户端未就绪:请先启用并配置 starpost 五键(见 casino_starpost status)。' });
-    const action = String(args.action ?? '');
-    const gameOf = (): OnlineGame => {
-      const g = String(args.game ?? '').toLowerCase() as OnlineGame;
-      if (!ONLINE_GAMES.includes(g)) throw new Error(`game 须为 ${ONLINE_GAMES.join('/')}`);
-      return g;
-    };
-    const targetOf = (): string => {
-      const t = String(args.target ?? '').trim();
-      if (!/^\d{5,12}$/.test(t)) throw new Error('target 须为好友的 botId(5–12 位数字)');
-      return t;
-    };
-    try {
-      switch (action) {
-        case 'invite': {
-          const game = gameOf(), target = targetOf();
-          await sp.client.sendPrivate(target, composeOnlineMessage('invite', game));
-          this.trackInvite({ direction: 'out', peer: target, game, at: nowIso(this.opts.timezone), status: 'pending' });
-          return JSON.stringify({ sent: true, game, target, note: '已发出邀约;对方接受/婉拒会以 casino.online_accepted / casino.online_declined 事件通知你。' });
-        }
-        case 'accept': {
-          const target = targetOf();
-          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
-          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
-          await sp.client.sendPrivate(target, composeOnlineMessage('accept', pending.game));
-          pending.status = 'accepted';
-          return JSON.stringify({ accepted: true, game: pending.game, target, note: '意向已互认。对局引擎在下一阶段接入。' });
-        }
-        case 'decline': {
-          const target = targetOf();
-          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
-          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
-          await sp.client.sendPrivate(target, composeOnlineMessage('decline', pending.game));
-          pending.status = 'declined';
-          return JSON.stringify({ declined: true, game: pending.game, target });
-        }
-        case 'list':
-          return JSON.stringify({ invites: sp.invites });
-        default:
-          return JSON.stringify({ error: `未知 action ${action};可用:invite/accept/decline/list` });
+    // —— 会话层:start 创建客座会话;其余动作需已有会话且来自对手 ——
+    switch (msg.action) {
+      case 'start': {
+        // 我是客座:对方(庄家)开了会话,凭据里的筹码账本来自消息。
+        const chips: Record<string, number> = {};
+        const chipsPart = msg.kv.chips ?? '';
+        for (const pair of chipsPart.split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
+        sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0 };
+        push('casino.online_session', `[星邮联机] ${peer} 的 ${sp.session.game} 联机会话已开启(你是闲家,庄家每手轮换)。等待庄家发手,收到下注请求后用 casino_online 的 act bet X 下注。`);
+        return;
       }
-    } catch (error) {
-      return JSON.stringify({ error: (error as Error).message, failed: true });
+      case 'hand': {
+        if (!session || session.peer !== peer) return;
+        push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
+        return;
+      }
+      case 'state': {
+        if (!session || session.peer !== peer) return;
+        const kv = msg.kv;
+        push('casino.online_state', `[星邮联机] 轮到你行动:你的点数 ${kv.total ?? '?'} · 庄家明牌 ${kv.dealerUp ?? '?'} · 押注 ${kv.bet ?? '?'} · 可用动作 ${kv.actions ?? '?'}。用 casino_online 的 act(hit/stand/double)行动。`);
+        return;
+      }
+      case 'settle': {
+        if (!session || session.peer !== peer) return;
+        const kv = msg.kv;
+        const reason = (() => { try { return decodeURIComponent(kv.reason ?? ''); } catch { return kv.reason ?? ''; } })();
+        const chips = (kv.chips ?? '?:?').split(':');
+        const delta = Number(kv.delta ?? 0);
+        push('casino.online_result', `[星邮联机] 第 ${kv.hands ?? '?'} 手结算(${reason}):你${delta >= 0 ? '赢' : '输'} ${Math.abs(delta)}。会话筹码 庄家 ${chips[0]} / 你 ${chips[1]}。稍候庄家轮换发新手。`);
+        return;
+      }
+      case 'handoff': {
+        if (!session || session.peer !== peer) return;
+        // 庄家轮换:我成为新的权威端,按对方传来的筹码账本建引擎。
+        const chips: Record<string, number> = {};
+        for (const pair of (msg.kv.chips ?? '').split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
+        session.chips = chips;
+        session.bank = this.myBotId();
+        session.handsTotal = msg.kv.hands ? Number(msg.kv.hands) : session.handsTotal;
+        session.engine = new RemoteBlackjack({
+          bankChips: chips[this.myBotId()] ?? this.opts.cfg.startChips,
+          playerChips: chips[session.peer] ?? this.opts.cfg.startChips,
+          minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
+          dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
+          deck: this.opts.starpostEngineDeck,
+        });
+        push('casino.online_state', `[星邮联机] 庄家轮换到你(共 ${session.handsTotal} 手)。你现在是庄家,正在请对方下注。`);
+        this.bankDealHand();
+        return;
+      }
+      case 'rest': {
+        if (!session || session.peer !== peer) return;
+        const minutes = Number(msg.kv.minutes ?? 5);
+        push('casino.online_state', `[星邮联机] 连续对局较多,进入 ${minutes} 分钟休息(防止消耗过大,到点庄家会自动换庄继续)。期间不需要任何操作。`);
+        return;
+      }
+      case 'reject': {
+        if (!session || session.peer !== peer) return;
+        const reason = (() => { try { return decodeURIComponent(msg.kv.reason ?? ''); } catch { return msg.kv.reason ?? ''; } })();
+        push('casino.online_state', `[星邮联机] 你的动作被庄家拒绝:${reason}。请根据上一个 state 事件重新行动。`);
+        return;
+      }
+      case 'stop': {
+        this.closeOnlineSession(`对方终止(${(() => { try { return decodeURIComponent(msg.kv.reason ?? 'unknown'); } catch { return msg.kv.reason ?? 'unknown'; } })()})`, false);
+        return;
+      }
+      case 'act': {
+        if (!session || session.peer !== peer) return;
+        if (session.bank === this.myBotId()) await this.bankApplyAct(msg.tokens);
+        return;
+      }
+      default:
+        return;
     }
   }
 
@@ -780,6 +961,85 @@ export class CasinoWorld implements World {
       const message = (error as Error).message;
       if (sp) sp.lastError = message;
       return JSON.stringify({ error: message, failed: true });
+    }
+  }
+
+  /** 联机工具:invite/accept/decline/act/stop/state/list。依赖星邮客户端就绪。 */
+  private async toolOnline(args: Record<string, unknown>): Promise<string> {
+    const sp = this.starpost;
+    if (!sp?.client) return JSON.stringify({ error: '星邮客户端未就绪:请先启用并配置 starpost 五键(见 casino_starpost status)。' });
+    const action = String(args.action ?? '');
+    const gameOf = (): OnlineGame => {
+      const g = String(args.game ?? '').toLowerCase() as OnlineGame;
+      if (!ONLINE_GAMES.includes(g)) throw new Error(`game 须为 ${ONLINE_GAMES.join('/')}`);
+      return g;
+    };
+    const targetOf = (): string => {
+      const t = String(args.target ?? '').trim();
+      if (!/^\d{5,12}$/.test(t)) throw new Error('target 须为好友的 botId(5–12 位数字)');
+      return t;
+    };
+    try {
+      switch (action) {
+        case 'invite': {
+          if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game},已 ${sp.session.handsTotal} 手),先 stop 再邀约。` });
+          const game = gameOf(), target = targetOf();
+          await sp.client.sendPrivate(target, composeOnlineMessage('invite', game));
+          this.trackInvite({ direction: 'out', peer: target, game, at: nowIso(this.opts.timezone), status: 'pending' });
+          return JSON.stringify({ sent: true, game, target, note: '已发出邀约;对方接受后对方机器先当庄(每手轮换),会话筹码独立于本地。' });
+        }
+        case 'accept': {
+          if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game}),先 stop 再回应。` });
+          const target = targetOf();
+          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
+          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
+          await sp.client.sendPrivate(target, composeOnlineMessage('accept', pending.game));
+          pending.status = 'accepted';
+          return JSON.stringify({ accepted: true, game: pending.game, target, note: '意向已互认,对方(首任庄家)将开局;对局状态以事件通知你,你的动作用 casino_online act 发送。' });
+        }
+        case 'decline': {
+          const target = targetOf();
+          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
+          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
+          await sp.client.sendPrivate(target, composeOnlineMessage('decline', pending.game));
+          pending.status = 'declined';
+          return JSON.stringify({ declined: true, game: pending.game, target });
+        }
+        case 'act': {
+          const session = sp.session;
+          if (!session) return JSON.stringify({ error: '当前没有联机会话。' });
+          const act = String(args.act ?? '').toLowerCase();
+          if (!['bet', 'hit', 'stand', 'double'].includes(act)) return JSON.stringify({ error: 'act 须为 bet/hit/stand/double' });
+          if (act === 'bet' && !Number.isSafeInteger(Number(args.amount))) return JSON.stringify({ error: 'bet 需要整数金额(amount)' });
+          const parts = [act, ...(act === 'bet' ? [String(args.amount)] : [])];
+          await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
+          return JSON.stringify({ sent: true, act, note: '动作已发给庄家;结果以 casino.online_state / casino.online_result 事件返回。' });
+        }
+        case 'stop': {
+          const session = sp.session;
+          if (!session) return JSON.stringify({ error: '当前没有联机会话。' });
+          this.closeOnlineSession(String(args.reason ?? 'owner'), true);
+          return JSON.stringify({ stopped: true, note: '会话已结束,双方牌桌回到本地模式。' });
+        }
+        case 'state': {
+          const session = sp.session;
+          if (!session) return JSON.stringify({ state: 'idle', note: '当前没有联机会话。' });
+          const myId = this.myBotId();
+          return JSON.stringify({
+            game: session.game, peer: session.peer, hands: session.handsTotal,
+            bank: session.bank, iAmBank: session.bank === myId,
+            chips: { me: session.chips[myId] ?? null, peer: session.chips[session.peer] ?? null },
+            phase: session.engine?.phase ?? (session.bank === myId ? 'awaitBet' : 'awaitBank'),
+            note: session.bank === myId ? '你是本手庄家(权威端)。' : '对方是本手庄家,等事件。',
+          });
+        }
+        case 'list':
+          return JSON.stringify({ invites: sp.invites, session: sp.session ? { game: sp.session.game, peer: sp.session.peer, bank: sp.session.bank, hands: sp.session.handsTotal } : null });
+        default:
+          return JSON.stringify({ error: `未知 action ${action};可用:invite/accept/decline/act/stop/state/list` });
+      }
+    } catch (error) {
+      return JSON.stringify({ error: (error as Error).message, failed: true });
     }
   }
 
