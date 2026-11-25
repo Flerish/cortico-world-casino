@@ -396,7 +396,7 @@ export class CasinoWorld implements World {
           if (pollMs > 0) {
             const scheduleNext = (): void => {
               if (state.timer) clearTimeout(state.timer);
-              const active = Boolean(sp.session) || sp.invites.some((i) => i.status === 'pending');
+              const active = Boolean(state.session) || state.invites.some((i) => i.status === 'pending');
               const ms = active ? Math.min(5000, pollMs) : pollMs;
               state.timer = setTimeout(() => { void this.starpostPoll().then(scheduleNext).catch(scheduleNext); }, ms);
             };
