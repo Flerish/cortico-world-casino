@@ -257,7 +257,7 @@ export class CasinoWorld implements World {
   /** 好友最近活动时间戳(botId → ms):面板在线状态的依据;重启清零。 */
   activity: Record<string, number>;
   /** 好友列表缓存(15s 过期,避免面板 1s 刷新直打星邮服务器)。 */
-  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string }> } | null;
+  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
   /** presence 心跳定时器:对好友周期性 poke(不耗消息配额),维持在线判定。 */
   presenceTimer: ReturnType<typeof setInterval> | null;
   /** 联机会话:accept 互认后由邀约发起方(首任庄家)创建;权威端(引擎持有者)每手轮换,筹码账本按 botId 记。 */
@@ -653,7 +653,6 @@ export class CasinoWorld implements World {
     const session = sp.session;
     const push = (type: string, text: string): void => this.onlineEvent(type, peer, text, at);
 
-    console.log(JSON.stringify({ dbg: msg.action, peer, kv: msg.kv, session: session ? session.bank : null }));
     // —— 意向层(不受会话状态限制,但会话进行中忽略新邀约) ——
     if (msg.action === 'invite') {
       if (session) return;
@@ -1236,7 +1235,7 @@ export class CasinoWorld implements World {
       }).catch((e) => { sp.lastError = (e as Error).message; });
     }
     const ONLINE_WINDOW_MS = 10 * 60 * 1000;
-    const friends = (sp.friendsCache?.list ?? []).map((f) => {
+    const friends = (sp.friendsCache?.list ?? []).filter((f) => f.bot).map((f) => {
       const last = sp.activity[f.id] ?? 0;
       const online = now - last < ONLINE_WINDOW_MS;
       return {
