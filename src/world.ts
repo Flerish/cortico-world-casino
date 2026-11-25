@@ -204,6 +204,20 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   },
 ];
 
+interface StarpostState {
+  client: StarpostClient;
+  timer: ReturnType<typeof setInterval>;
+  cursors: Record<string, number>;
+  lastError: string | null;
+  lastPollAt: string | null;
+  lastQuota: unknown;
+  invites: OnlineInvite[];
+  activity: Record<string, number>;
+  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string }> } | null;
+  presenceTimer: ReturnType<typeof setInterval> | null;
+  session: OnlineSessionShape | null;
+}
+
 export interface OnlineSessionShape {
   game: OnlineGame;
   peer: string;
@@ -236,6 +250,8 @@ export class CasinoWorld implements World {
   activity: Record<string, number>;
   /** 好友列表缓存(15s 过期,避免面板 1s 刷新直打星邮服务器)。 */
   friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string }> } | null;
+  /** presence 心跳定时器:对好友周期性 poke(不耗消息配额),维持在线判定。 */
+  presenceTimer: ReturnType<typeof setInterval> | null;
   /** 联机会话:accept 互认后由邀约发起方(首任庄家)创建;权威端(引擎持有者)每手轮换,筹码账本按 botId 记。 */
   session: OnlineSessionShape | null;
 } | null = null;
@@ -328,6 +344,7 @@ export class CasinoWorld implements World {
   async stop(): Promise<void> {
     if (this.state) this.save();
     if (this.starpost?.timer) clearInterval(this.starpost.timer);
+    if (this.starpost?.presenceTimer) clearInterval(this.starpost.presenceTimer);
     this.starpost = null;
     for (const socket of this.sockets) socket.close('world stopped');
     this.sockets.clear();
@@ -343,7 +360,7 @@ export class CasinoWorld implements World {
         { serverUrl: cfg.starpostServer, botId: cfg.starpostBotId, token: cfg.starpostToken },
         { post: this.opts.starpostPost },
       );
-      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[], session: null, activity: {}, friendsCache: null };
+      const state: StarpostState = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: null, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null, presenceTimer: null };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
       void client.snapshot(true)
@@ -351,11 +368,26 @@ export class CasinoWorld implements World {
           if (snap?.botId && snap.botId !== client.botId) throw new Error(`服务器返回的账号 (${snap.botId}) 与配置的 botId 不一致`);
           void this.starpostPoll();
           const pollMs = Math.max(0, Math.floor(Number(cfg.starpostPollMs) || 0));
+          // presence 心跳:对好友周期性 poke(不耗消息配额),双方开桌即互为在线;停桌 10 分钟后自然转灰。
+          if (state.presenceTimer) clearInterval(state.presenceTimer);
+          const presenceTick = async (): Promise<void> => {
+            try {
+              const cache = state.friendsCache;
+              if (!cache?.list?.length) return;
+              for (const f of cache.list) {
+                if (f.id === client.botId) continue;
+                await client.rpc('poke', { to: f.id }).catch(() => {});
+              }
+              state.lastError = null;
+            } catch { /* 心跳失败不打扰主流程,下一轮重试。 */ }
+          };
+          state.presenceTimer = setInterval(() => { void presenceTick(); }, 8 * 60 * 1000);
+          setTimeout(() => { void presenceTick(); }, 30 * 1000); // 首轮 30s 后开始
           if (pollMs > 0) state.timer = setInterval(() => { void this.starpostPoll(); }, pollMs);
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
-      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null };
+      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null, presenceTimer: null };
     }
   }
 
@@ -373,6 +405,7 @@ export class CasinoWorld implements World {
           const text = typeof msg.text === 'string' ? msg.text : (msg.audio ? '[语音]' : msg.forward ? '[聊天记录]' : '[图片/表情]');
           // @casino 协议消息(仅私聊参与):路由进联机会话,不当聊天投递。
           if (conv.kind === 'private') sp.activity[msg.sender] = Date.now();
+          if ((msg as Record<string, unknown>).interaction === 'poke') continue; // 戳一戳:只作 presence 信号,不推给 AI
           if (conv.kind === 'private') {
             const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
             if (protocol) { await this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }

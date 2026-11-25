@@ -238,7 +238,7 @@ describe('牌桌 × 星邮集成', () => {
     await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
     net.deliver('12345', '67890', '随便聊聊');
     await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
-    const snap = await worldAny.handleInvoke('table', 'online', []);
+    const snap = (await worldAny.handleInvoke('table', 'online', [])) as Record<string, any>;
     expect(snap.enabled).toBe(true);
     expect(snap.status).toBe('idle');
     const friends = snap.friends as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
