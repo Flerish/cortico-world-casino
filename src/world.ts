@@ -392,7 +392,16 @@ export class CasinoWorld implements World {
           };
           state.presenceTimer = setInterval(() => { void presenceTick(); }, 8 * 60 * 1000);
           setTimeout(() => { void presenceTick(); }, 30 * 1000); // 首轮 30s 后开始
-          if (pollMs > 0) state.timer = setInterval(() => { void this.starpostPoll(); }, pollMs);
+          // 自适应轮询:有联机会话或待回应邀约时 5s 快轮(协议消息每跳最多等 5s),空闲回落到配置间隔。
+          if (pollMs > 0) {
+            const scheduleNext = (): void => {
+              if (state.timer) clearTimeout(state.timer);
+              const active = Boolean(sp.session) || sp.invites.some((i) => i.status === 'pending');
+              const ms = active ? Math.min(5000, pollMs) : pollMs;
+              state.timer = setTimeout(() => { void this.starpostPoll().then(scheduleNext).catch(scheduleNext); }, ms);
+            };
+            scheduleNext();
+          }
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
