@@ -164,7 +164,7 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'casino_online',
     description:
-      'Online play over Starpost (requires the Starpost client ready). Actions: "invite" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter\'s machine becomes the host), "accept"/"decline" (respond to an incoming invitation), "act" (in a session, actions depend on the game — blackjack: bet with amount / hit / stand / double; oldmaid: draw; holdem: fold / check / call / bet with amount / raise with amount — send when an online_state event says it is your turn), "stop" (end the session; chips settle as-is), "state" (session summary), "list". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.',
+      'Online play over Starpost (requires the Starpost client ready). Actions: "invite" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter\'s machine becomes the host), "accept"/"decline" (respond to an incoming invitation), "act" (in a session, actions depend on the game — blackjack: bet with amount / hit / stand / double; oldmaid: draw (automatic — the world draws for you on your turn); holdem: fold / check / call / bet with amount / raise with amount — send when an online_state event says it is your turn), "stop" (end the session; chips settle as-is), "state" (session summary), "list". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.',
     tags: ['write'],
     parameters: {
       type: 'object',
@@ -768,6 +768,13 @@ export class CasinoWorld implements World {
       }
       case 'hand': {
         if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:hand 是对方错位发来的(它以为自己是庄家),忽略
+        if (session.game === 'oldmaid') {
+          // 抽鬼牌:开局即发牌(无下注);轮到闲家时世界层自动抽牌(抽牌是强制动作,无需 AI 决策)。
+          const kv = msg.kv;
+          push('casino.online_state', `[星邮联机] 新一局抽鬼牌开始,你的手牌 ${kv.cards ?? '?'}(${kv.yourCount ?? '?'} 张),对方 ${kv.oppCount ?? '?'} 张。${kv.turn === 'you' ? '轮到你先抽(已自动执行)。' : '对方先抽,稍候。'}`);
+          if (kv.turn === 'you') void sp.client.sendPrivate(peer, onlineLine('act', ['draw'])).catch(() => {});
+          return;
+        }
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
         return;
       }
@@ -776,7 +783,9 @@ export class CasinoWorld implements World {
         session.lastState = msg.kv;
         const kv = msg.kv;
         if (session.game === 'oldmaid') {
-          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你抽牌' : '庄家抽牌中'}:你 ${kv.yourCount ?? '?'} 张 · 对方 ${kv.oppCount ?? '?'} 张 · 已弃 ${kv.pairs ?? '?'} 对 · 你的手牌 ${kv.cards ?? '?'}。用 casino_online 的 act draw 抽牌。`);
+          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你抽牌(已自动执行)' : '庄家抽牌中'}:你 ${kv.yourCount ?? '?'} 张 · 对方 ${kv.oppCount ?? '?'} 张 · 已弃 ${kv.pairs ?? '?'} 对 · 你的手牌 ${kv.cards ?? '?'}。`);
+          // 抽牌是强制动作:轮到闲家时世界层自动抽,不依赖 AI 决策(残局多轮抽牌不再卡住)。
+          if (kv.turn === 'you') void sp.client.sendPrivate(peer, onlineLine('act', ['draw'])).catch(() => {});
           return;
         }
         if (session.game === 'holdem') {
@@ -1456,6 +1465,10 @@ export class CasinoWorld implements World {
           const act = String(args.act ?? '').toLowerCase();
           const validActs = session.game === 'blackjack' ? ['bet', 'hit', 'stand', 'double'] : session.game === 'oldmaid' ? ['draw'] : ['fold', 'check', 'call', 'bet', 'raise'];
           if (!validActs.includes(act)) return JSON.stringify({ error: `${session.game} 的动作集:${validActs.join('/')}` });
+          if (session.game === 'oldmaid' && act === 'draw' && session.bank !== this.myBotId()) {
+            // 闲家的抽牌已自动化(世界层在收到轮次消息时自动抽),AI 手动 draw 无需也不会重复发送。
+            return JSON.stringify({ note: '抽鬼牌的抽牌已自动化:轮到你时系统会自动抽牌,无需手动操作,等事件通知即可。' });
+          }
           if (act === 'bet' && !Number.isSafeInteger(Number(args.amount))) return JSON.stringify({ error: 'bet 需要整数金额(amount)' });
           // 我是庄家:动作直接落本地引擎;否则发协议给庄家。
           if (session.bank === this.myBotId() && session.engine) {
