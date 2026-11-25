@@ -516,6 +516,7 @@ export class CasinoWorld implements World {
       await this.onlineSend(session.peer, onlineLine('stop', [`reason=${encodeURIComponent(reason)}`])).catch(() => {});
     }
     sp.session = null;
+    console.log(`[casino] 会话结束(${reason}):庄家=${session.bank} 对手=${session.peer}`);
     this.onlineEvent('casino.online_session', session.peer, `[星邮联机] ${session.game} 会话结束(${reason})。牌桌回到本地模式。`, nowIso(this.opts.timezone));
   }
 
@@ -692,6 +693,7 @@ export class CasinoWorld implements World {
       const myId = this.myBotId();
       const engine = this.newRemoteEngine(target.game, startChips);
       sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
+      console.log(`[casino] 会话建立:我=庄家(${this.myBotId()}) 对手=${peer} 游戏=${target.game}`);
       await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
       push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
@@ -715,6 +717,7 @@ export class CasinoWorld implements World {
         const chipsPart = msg.kv.chips ?? '';
         for (const pair of chipsPart.split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
         sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
+        console.log(`[casino] 会话建立:我=闲家(${this.myBotId()}) 庄家=${peer} 游戏=${sp.session.game}`);
         push('casino.online_session', `[星邮联机] ${peer} 的 ${sp.session.game} 联机会话已开启(你是闲家,庄家每手轮换)。等待庄家发手,收到下注请求后用 casino_online 的 act bet X 下注。`);
         return;
       }
@@ -1117,8 +1120,8 @@ export class CasinoWorld implements World {
     }
   }
 
-  /** 观战快照:点左侧 AI 名字进入;返回与本地快照同构的对象,面板直接渲染单机牌桌。
-   * 角色映射:本地 'ai' 位 = 我方 AI,'player' 位 = 对方 AI;牌面泄底原则同本地(庄家端上帝视角,客座端只见自己视角)。 */
+  /** 观战快照:点左侧 AI 名字进入;返回与本地快照同构的对象(包在 snapshot 字段里),面板直接渲染单机牌桌。
+   * 角色映射:本地 'ai' 位 = 我方 AI,'player' 位 = 对方 AI;庄家端上帝视角,客座端只见自己视角。 */
   private spectateSnapshot(): Record<string, unknown> {
     const session = this.starpost?.session;
     if (!session) return { state: 'idle' };
@@ -1143,7 +1146,33 @@ export class CasinoWorld implements World {
     const engine = session.engine;
 
     if (session.game === 'blackjack') {
-      const bj = engine as RemoteBlackjack;
+      const bj = engine ? (engine as RemoteBlackjack) : null;
+      if (!bj) {
+        // 客座端:无权威引擎,用最近收到的 state/settle 参数构造视角(闲家自己的牌可见,庄家只亮明牌)。
+        const kv = session.lastState ?? {};
+        const settleKv = session.lastSettle ?? {};
+        const outcomeKv: 'win' | 'lose' | 'push' | null = settleKv.result ? (settleKv.result === 'player' ? 'win' : settleKv.result === 'bank' ? 'lose' : 'push') : null;
+        const aiRole = iAmBank ? 'ai' : 'player';
+        return { state: 'active', snapshot: {
+          ...base,
+          game: 'blackjack',
+          phase: kv.actions && kv.actions !== 'none' ? 'playerActing' : 'betting',
+          round: session.handsTotal + 1,
+          aiRole,
+          bet: Number(kv.bet ?? 0),
+          insurance: 0,
+          holeRevealed: false,
+          dealerActing: false,
+          hands: [{ cards: kv.cards && kv.cards !== 'none' ? kv.cards.split(',') : [], total: kv.total ? Number(kv.total) : null, bet: Number(kv.bet ?? 0), doubled: false, outcome: outcomeKv, active: kv.turn === 'you' }],
+          activeHand: 0,
+          dealerCards: kv.up && kv.up !== 'none' ? [kv.up] : (settleKv.dealer && settleKv.dealer !== 'none' ? settleKv.dealer.split(',') : []),
+          dealerVisibleTotal: kv.dealerUp ? Number(kv.dealerUp) : null,
+          dealerTotal: null,
+          holeCount: 0,
+          lastResult: settleKv.result ? { dealer: aiRole === 'ai' ? 'ai' : 'player', round: session.handsTotal, bet: Number(kv.bet ?? 0), hands: [{ cards: [], bet: Number(kv.bet ?? 0), outcome: outcomeKv }], dealerCards: settleKv.dealer && settleKv.dealer !== 'none' ? settleKv.dealer.split(',') : [], insurance: 0, insuranceWon: false, delta: iAmBank ? -Number(settleKv.delta ?? 0) : Number(settleKv.delta ?? 0), surrendered: false, at: nowIso(this.opts.timezone) } : null,
+          history: [],
+        } };
+      }
       const h = bj.hand;
       const settle = bj.lastSettle;
       const aiRole = iAmBank ? 'ai' : 'player';
@@ -1153,7 +1182,7 @@ export class CasinoWorld implements World {
       const dealerVisible = holeRevealed ? dealerCards : dealerCards.slice(0, 1);
       const outcome: 'win' | 'lose' | 'push' | null = settle ? (settle.winner === 'player' ? 'win' : settle.winner === 'bank' ? 'lose' : 'push') : null;
       const bet = bj.bet;
-      return {
+      return { state: 'active', snapshot: {
         ...base,
         game: 'blackjack',
         phase: bj.phase === 'awaitBet' || bj.phase === 'done' ? 'betting' : 'playerActing',
@@ -1189,17 +1218,18 @@ export class CasinoWorld implements World {
           at: nowIso(this.opts.timezone),
         } : null,
         history: [],
-      };
+      } };
     }
 
     if (session.game === 'oldmaid') {
       const om = engine as RemoteOldMaid;
-      const st = om.state!;
+      if (!om?.state) return { state: 'active', snapshot: { ...base, game: 'oldmaid', phase: 'idle', spectate: true } };
+      const st = om.state;
       const idlerLocal: 'ai' | 'player' = iAmBank ? 'player' : 'ai';
       const myHand = iAmBank ? st.bankHand : st.playerHand;
       const peerHand = iAmBank ? st.playerHand : st.bankHand;
       const turnOwner = st.turn === 'player' ? idlerLocal : (idlerLocal === 'ai' ? 'player' : 'ai');
-      return {
+      return { state: 'active', snapshot: {
         ...base,
         game: 'oldmaid',
         turnOwner,
@@ -1213,18 +1243,19 @@ export class CasinoWorld implements World {
         hiddenCard: null,
         oldmaidPlays: session.handsTotal,
         oldmaidHistory: [],
-      };
+      } };
     }
 
     const hd = engine as RemoteHoldem;
-    const st = hd.state!;
+    if (!hd?.state) return { state: 'active', snapshot: { ...base, game: 'holdem', phase: 'idle', spectate: true } };
+    const st = hd.state;
     const myCards = iAmBank ? st.hole.bank : st.hole.player;
     const peerCards = iAmBank ? st.hole.player : st.hole.bank;
     const mySeat = iAmBank ? st.seats.bank : st.seats.player;
     const peerSeat = iAmBank ? st.seats.player : st.seats.bank;
     const settle = hd.lastSettle;
     const winner: 'ai' | 'player' | null = settle && settle.winner !== 'push' ? (settle.winner === 'player' ? (iAmBank ? 'player' : 'ai') : (iAmBank ? 'ai' : 'player')) : null;
-    return {
+    return { state: 'active', snapshot: {
       ...base,
       game: 'holdem',
       phase: st.street === 'showdown' ? 'runout' : st.street,
@@ -1251,7 +1282,7 @@ export class CasinoWorld implements World {
       playerAllIn: peerSeat.allIn,
       lastHoldem: null,
       holdemHistory: [],
-    };
+    } };
   }
 
   /** 面板联机页快照:本地 AI 状态 + 好友列表(带在线/对局标记)。 */
