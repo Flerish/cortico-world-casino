@@ -25,6 +25,7 @@ import {
 } from './cards.ts';
 import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
 import { StarpostClient, type StarpostMessage } from './starpost-client.ts';
+import { parseOnlineMessage, composeOnlineMessage, ONLINE_GAMES, type OnlineGame, type OnlineInvite } from './online-protocol.ts';
 import { modelText, readModelLanguage, readOwnerLabel, type ModelText } from './model-text.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
@@ -155,6 +156,22 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
     },
   },
   {
+    name: 'casino_online',
+    description:
+      'Online-play invitations over Starpost (requires the Starpost client to be ready). Actions: "invite" (challenge a friend to a game; target = friend botId, game = blackjack/oldmaid/holdem), "accept" or "decline" (respond to an incoming invitation; target = inviter botId), "list" (all invitation records with statuses). Sending and answering invites exchanges @casino protocol messages; a future phase will start real cross-machine games after intent is confirmed.',
+    tags: ['write'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['invite', 'accept', 'decline', 'list'], description: 'What to do.' },
+        target: { type: 'string', description: 'The friend botId to invite or respond to.' },
+        game: { type: 'string', enum: ['blackjack', 'oldmaid', 'holdem'], description: 'invite: which game to play.' },
+      },
+      required: ['action'],
+    },
+  },
+  {
     name: 'oldmaid_draw',
     description:
       "Draw one face-down card from the owner's hand in an Old Maid game; only valid when it is your turn to draw. The receipt tells you which card you drew and whether it formed a pair that was discarded.",
@@ -196,6 +213,8 @@ export class CasinoWorld implements World {
     lastError: string | null;
     lastPollAt: string | null;
     lastQuota: unknown;
+    /** @casino 联机邀约记录(内存态,重启即失效)。 */
+    invites: OnlineInvite[];
   } | null = null;
 
   constructor(private readonly opts: CasinoWorldOptions) {}
@@ -301,7 +320,7 @@ export class CasinoWorld implements World {
         { serverUrl: cfg.starpostServer, botId: cfg.starpostBotId, token: cfg.starpostToken },
         { post: this.opts.starpostPost },
       );
-      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown };
+      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[] };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
       void client.snapshot(true)
@@ -313,7 +332,7 @@ export class CasinoWorld implements World {
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
-      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null };
+      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [] };
     }
   }
 
@@ -329,6 +348,11 @@ export class CasinoWorld implements World {
         for (const msg of page.messages) {
           if (msg.sender === sp.client.botId) continue; // 自己发的跳过
           const text = typeof msg.text === 'string' ? msg.text : (msg.audio ? '[语音]' : msg.forward ? '[聊天记录]' : '[图片/表情]');
+          // @casino 协议消息(仅私聊参与):路由进联机会话,不当聊天投递。
+          if (conv.kind === 'private') {
+            const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
+            if (protocol) { this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }
+          }
           const nickname = msg.senderNickname ? `(${msg.senderNickname})` : '';
           void this.host?.pushEvent({
             type: 'casino.starpost_message',
@@ -347,6 +371,93 @@ export class CasinoWorld implements World {
       sp.lastPollAt = nowIso(this.opts.timezone);
     } catch (error) {
       sp.lastError = (error as Error).message;
+    }
+  }
+
+  /** 记录/更新邀约条目;容量上限 20,挤掉最老的已终结记录。 */
+  private trackInvite(entry: OnlineInvite): void {
+    const sp = this.starpost!;
+    const same = sp.invites.find((i) => i.direction === entry.direction && i.peer === entry.peer && i.game === entry.game && i.status === 'pending');
+    if (same) { same.at = entry.at; same.status = entry.status; return; }
+    sp.invites.unshift(entry);
+    if (sp.invites.length > 20) sp.invites.length = 20;
+  }
+
+  /** 处理 @casino 协议消息:更新邀约状态并推对应事件;未匹配的静默忽略。 */
+  private handleOnlineMessage(peer: string, msg: { action: 'invite' | 'accept' | 'decline'; game: OnlineGame | null }, at: string): void {
+    const sp = this.starpost!;
+    const push = (type: string, text: string): void => {
+      void this.host?.pushEvent({
+        type, ts: at, source: this.id, origin: 'external', senderKey: `starpost.private.${peer}`, text,
+      }, { trigger: 'flush' });
+    };
+    if (msg.action === 'invite') {
+      const game = msg.game ?? 'blackjack';
+      const pending = sp.invites.some((i) => i.direction === 'in' && i.peer === peer && i.game === game && i.status === 'pending');
+      this.trackInvite({ direction: 'in', peer, game, at, status: 'pending' });
+      if (!pending) push('casino.online_invite', `[星邮联机] ${peer} 邀请你玩一局 ${game}。用 casino_online 的 accept/decline(action + target)回应;开局流程在下一阶段提供,现阶段仅交换意向。`);
+      return;
+    }
+    if (msg.action === 'accept') {
+      const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
+      if (!target) return; // 没有待应答的邀约,静默
+      target.status = 'accepted';
+      push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。对局引擎在下一阶段接入,现阶段仅确认意向。`);
+      return;
+    }
+    // decline
+    const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
+    if (!target) return;
+    target.status = 'declined';
+    push('casino.online_declined', `[星邮联机] ${peer} 婉拒了你的${target.game}邀约。`);
+  }
+
+  /** 联机工具:invite/accept/decline/list。依赖星邮客户端就绪。 */
+  private async toolOnline(args: Record<string, unknown>): Promise<string> {
+    const sp = this.starpost;
+    if (!sp?.client) return JSON.stringify({ error: '星邮客户端未就绪:请先启用并配置 starpost 五键(见 casino_starpost status)。' });
+    const action = String(args.action ?? '');
+    const gameOf = (): OnlineGame => {
+      const g = String(args.game ?? '').toLowerCase() as OnlineGame;
+      if (!ONLINE_GAMES.includes(g)) throw new Error(`game 须为 ${ONLINE_GAMES.join('/')}`);
+      return g;
+    };
+    const targetOf = (): string => {
+      const t = String(args.target ?? '').trim();
+      if (!/^\d{5,12}$/.test(t)) throw new Error('target 须为好友的 botId(5–12 位数字)');
+      return t;
+    };
+    try {
+      switch (action) {
+        case 'invite': {
+          const game = gameOf(), target = targetOf();
+          await sp.client.sendPrivate(target, composeOnlineMessage('invite', game));
+          this.trackInvite({ direction: 'out', peer: target, game, at: nowIso(this.opts.timezone), status: 'pending' });
+          return JSON.stringify({ sent: true, game, target, note: '已发出邀约;对方接受/婉拒会以 casino.online_accepted / casino.online_declined 事件通知你。' });
+        }
+        case 'accept': {
+          const target = targetOf();
+          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
+          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
+          await sp.client.sendPrivate(target, composeOnlineMessage('accept', pending.game));
+          pending.status = 'accepted';
+          return JSON.stringify({ accepted: true, game: pending.game, target, note: '意向已互认。对局引擎在下一阶段接入。' });
+        }
+        case 'decline': {
+          const target = targetOf();
+          const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
+          if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
+          await sp.client.sendPrivate(target, composeOnlineMessage('decline', pending.game));
+          pending.status = 'declined';
+          return JSON.stringify({ declined: true, game: pending.game, target });
+        }
+        case 'list':
+          return JSON.stringify({ invites: sp.invites });
+        default:
+          return JSON.stringify({ error: `未知 action ${action};可用:invite/accept/decline/list` });
+      }
+    } catch (error) {
+      return JSON.stringify({ error: (error as Error).message, failed: true });
     }
   }
 
@@ -467,6 +578,7 @@ export class CasinoWorld implements World {
     if (name === 'casino_player') return this.toolPlayer(args);
     if (name === 'casino_bank') return this.toolBank(args);
     if (name === 'casino_starpost') return await this.toolStarpost(args);
+    if (name === 'casino_online') return await this.toolOnline(args);
     if (name === 'oldmaid_draw') return await this.toolOldMaidDraw();
     if (name === 'holdem_act') return await this.toolHoldemAct(args);
     return `Unknown tool ${name}.`;

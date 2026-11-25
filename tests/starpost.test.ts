@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { StarpostClient, StarpostError, type StarpostPost } from '../src/starpost-client.ts';
+import { parseOnlineMessage, composeOnlineMessage } from '../src/online-protocol.ts';
 import { CASINO_TOOL_DECLS, CasinoWorld } from '../src/world.ts';
 import { CASINO } from '../src/definition.ts';
 import { fakeWorldContext } from 'cortico/extensions/dry-mount.ts';
@@ -152,6 +153,90 @@ describe('牌桌 × 星邮集成', () => {
     const status = await tool(world, 'casino_starpost', { action: 'status' });
     expect(status.enabled).toBe(true);
     expect(String(status.lastError)).not.toBe('');
+    await world.stop();
+  });
+
+  it('@casino 协议:合法消息解析,非协议/坏格式返回 null', () => {
+    expect(parseOnlineMessage('@casino invite blackjack')).toEqual({ action: 'invite', game: 'blackjack' });
+    expect(parseOnlineMessage('@casino accept')).toEqual({ action: 'accept', game: null });
+    expect(parseOnlineMessage('@casino decline holdem')).toEqual({ action: 'decline', game: 'holdem' });
+    expect(parseOnlineMessage('@casino')).toBeNull();
+    expect(parseOnlineMessage('@casino invite poker')).toBeNull();
+    expect(parseOnlineMessage('@casino hack')).toBeNull();
+    expect(parseOnlineMessage('来一局 @casino invite')).toBeNull();
+    expect(parseOnlineMessage('')).toBeNull();
+    expect(composeOnlineMessage('invite', 'holdem')).toBe('@casino invite holdem');
+  });
+
+  it('联机邀约全流程:我方邀约→对方接受→事件;对方反邀→事件→婉拒→回发协议', async () => {
+    const calls: Array<{ url: string; body: any; headers: Record<string, string> }> = [];
+    // 收件箱按轮次变化:第一轮对方接受我们的邀约,第二轮对方反邀 oldmaid。
+    let pollTurn = 0;
+    const transport: StarpostPost = async (url, body, headers) => {
+      const action = (body as any)?.action ?? '';
+      calls.push({ url, body, headers: headers ?? {} });
+      if (action === 'snapshot') return { status: 200, body: { ok: true, result: { botId: '12345', friends: ['67890'] } } };
+      if (action === 'inbox.peek') {
+        pollTurn++;
+        // 第 1 轮是 start() 的自动轮询(返回空);第 2 轮对方接受,第 3 轮对方反邀。
+        const conversations = pollTurn === 2
+          ? [{ kind: 'private', target: '67890', unread: 1, latestCursor: 5 }]
+          : pollTurn === 3
+            ? [{ kind: 'private', target: '67890', unread: 1, latestCursor: 9 }]
+            : [];
+        return { status: 200, body: { ok: true, result: { conversations } } };
+      }
+      if (action === 'chat.history') {
+        const after = (body as any)?.args?.after ?? 0;
+        return { status: 200, body: { ok: true, result: after === 0
+          ? { messages: [{ id: 'm1', sender: '67890', text: '@casino accept blackjack', cursor: 5 }], nextBefore: null, nextAfter: null }
+          : { messages: [{ id: 'm2', sender: '67890', text: '@casino invite oldmaid', cursor: 9 }], nextBefore: null, nextAfter: null } } };
+      }
+      if (action === 'message.send') return { status: 200, body: { ok: true, result: { delivered: true } } };
+      return { status: 200, body: { ok: true, result: {} } };
+    };
+    const world = starpostWorld(transport);
+    const host = new FakeHost();
+    await world.start(host);
+    await new Promise((r) => setTimeout(r, 5));
+    // 我方发出邀约(协议消息 + 记录 pending)。
+    const inv = await tool(world, 'casino_online', { action: 'invite', target: '67890', game: 'blackjack' });
+    expect(inv.sent).toBe(true);
+    const inviteCall = calls.filter((c) => c.body.action === 'message.send').at(-1)!;
+    expect(inviteCall.body.args.text).toBe('@casino invite blackjack');
+    // 第一轮轮询:对方接受 → casino.online_accepted 事件(无 @casino 聊天事件泄漏)。
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(host.events.some((e) => e.type === 'casino.online_accepted' && e.text.includes('67890'))).toBe(true);
+    expect(host.events.some((e) => e.type === 'casino.starpost_message' && e.text.includes('@casino'))).toBe(false);
+    // 第二轮轮询:对方反邀 oldmaid → casino.online_invite 事件。
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(host.events.some((e) => e.type === 'casino.online_invite' && e.text.includes('oldmaid'))).toBe(true);
+    // 婉拒:回发 @casino decline oldmaid。
+    const ack = await tool(world, 'casino_online', { action: 'decline', target: '67890' });
+    expect(ack.declined).toBe(true);
+    expect(ack.game).toBe('oldmaid');
+    const declineCall = calls.filter((c) => c.body.action === 'message.send').at(-1)!;
+    expect(declineCall.body.args.text).toBe('@casino decline oldmaid');
+    // 邀约记录可查。
+    const list = await tool(world, 'casino_online', { action: 'list' });
+    expect(list.invites.length).toBeGreaterThanOrEqual(2);
+    await world.stop();
+  });
+
+  it('婉拒路径:decline 回发协议消息并记录状态', async () => {
+    const world = starpostWorld(fakeTransport({
+      snapshot: { botId: '12345', friends: ['67890'] },
+      inbox: { conversations: [{ kind: 'private', target: '67890', unread: 1, latestCursor: 3 }] },
+      history: { messages: [{ id: 'm1', sender: '67890', text: '@casino invite oldmaid', cursor: 3 }] },
+    }));
+    await world.start(new FakeHost());
+    await new Promise((r) => setTimeout(r, 5));
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    const ack = await tool(world, 'casino_online', { action: 'decline', target: '67890' });
+    expect(ack.declined).toBe(true);
+    expect(ack.game).toBe('oldmaid');
     await world.stop();
   });
 });
