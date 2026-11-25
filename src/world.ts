@@ -366,7 +366,7 @@ export class CasinoWorld implements World {
       void client.snapshot(true)
         .then((snap) => {
           if (snap?.botId && snap.botId !== client.botId) throw new Error(`服务器返回的账号 (${snap.botId}) 与配置的 botId 不一致`);
-          state.friendsCache = { fetchedAt: Date.now(), list: (snap?.friendProfiles ?? []).map((p: Record<string, unknown>) => ({ id: String(p.id), nickname: p.nickname as string | undefined })) };
+          state.friendsCache = { fetchedAt: Date.now(), list: (snap?.friendProfiles ?? []).map((p: Record<string, unknown>) => ({ id: String(p.botId ?? p.id ?? ''), nickname: p.nickname as string | undefined })) };
           void this.starpostPoll();
           const pollMs = Math.max(0, Math.floor(Number(cfg.starpostPollMs) || 0));
           // presence 心跳:对好友周期性 poke(不耗消息配额),双方开桌即互为在线;停桌 10 分钟后自然转灰。

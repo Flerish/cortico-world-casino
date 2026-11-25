@@ -655,7 +655,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           row.append(el('span', 'friend-id', f.id));
           const plus = el('button', 'friend-invite', '+');
           plus.type = 'button';
-          plus.title = T.online.inviteBtnTitle;
+          plus.title = f.online ? T.online.inviteBtnTitle : T.online.inviteOfflineTitle;
+          if (!f.online) plus.disabled = true; // 只有在线好友可邀约(离线置灰)
           plus.addEventListener('click', () => {
             // 弹窗:选择邀请游玩的种类。
             const overlay = el('div', 'rules-overlay');

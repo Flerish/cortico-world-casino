@@ -116,7 +116,7 @@ export class StarpostClient {
       botId: snap.botId,
       profile: snap.profile ?? {},
       friends: Array.isArray(snap.friends) ? snap.friends : [],
-      profiles: Array.isArray(snap.friendProfiles) ? snap.friendProfiles : [],
+      profiles: Array.isArray(snap.friendProfiles) ? snap.friendProfiles.map((p: Record<string, unknown>) => ({ ...p, id: String(p.botId ?? p.id ?? p.humanId ?? '') })) : [],
       requests: Array.isArray(snap.requests) ? snap.requests : [],
     };
   }
