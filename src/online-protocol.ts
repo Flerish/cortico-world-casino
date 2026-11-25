@@ -78,5 +78,5 @@ export interface OnlineInvite {
   peer: string;
   game: OnlineGame;
   at: string;
-  status: 'pending' | 'accepted' | 'declined';
+  status: 'pending' | 'accepted' | 'declined' | 'expired';
 }

@@ -245,7 +245,12 @@ describe('牌桌 × 星邮集成', () => {
     expect(snap.status).toBe('idle');
     const friends = snap.friends as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
     expect(friends.length).toBe(0); // friends 缓存来自 snapshot 的 profiles;测试假网络未返回 profiles
-    // 面板代发邀约:走 online-invite action 路由。
+    // 邀约守卫(主人指示):有待回应邀约时,向同一对方发起邀约被拒。
+    const blocked = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'blackjack' }]);
+    expect((blocked as any).error).toContain('待回应');
+    // 先婉拒对方的邀约 → 再邀约成功。
+    const dec = await (world as unknown as { toolOnline: (a: Record<string, unknown>) => Promise<string> }).toolOnline({ action: 'decline', target: '67890' });
+    expect(JSON.parse(dec).declined).toBe(true);
     const inv = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'blackjack' }]);
     expect((inv as any).sent).toBe(true);
     const sendCall = calls.filter((c) => c.body.action === 'message.send').at(-1)!;

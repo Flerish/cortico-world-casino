@@ -405,6 +405,7 @@ export class CasinoWorld implements World {
     const sp = this.starpost;
     if (!sp?.client) return;
     try {
+      this.sweepInvites();
       const peek = await sp.client.inboxPeek(sp.cursors);
       for (const conv of peek.conversations ?? []) {
         const scope = `${conv.kind}:${conv.target}`;
@@ -446,6 +447,16 @@ export class CasinoWorld implements World {
   }
 
   /** 记录/更新邀约条目;容量上限 20,挤掉最老的已终结记录。 */
+  /** 邀约清扫:pending 超 15 分钟自动过期(对方可能已下线或改主意)。 */
+  private sweepInvites(): void {
+    const sp = this.starpost;
+    if (!sp) return;
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    for (const i of sp.invites) {
+      if (i.status === 'pending' && Date.parse(i.at) < cutoff) i.status = 'expired';
+    }
+  }
+
   private trackInvite(entry: OnlineInvite): void {
     const sp = this.starpost!;
     const same = sp.invites.find((i) => i.direction === entry.direction && i.peer === entry.peer && i.game === entry.game && i.status === 'pending');
@@ -1316,6 +1327,9 @@ export class CasinoWorld implements World {
         case 'invite': {
           if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game},已 ${sp.session.handsTotal} 手),先 stop 再邀约。` });
           const game = gameOf(), target = targetOf();
+          // 主人指示:被对方邀请后不能再向对方发邀约——先回应(accept/decline)再发,避免双向邀约竞态。
+          const incoming = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending' && i.game === game);
+          if (incoming) return JSON.stringify({ error: `你有一封来自 ${target} 的待回应邀约(${incoming.game})。先决定 accept 或 decline,再发起新邀约。`, blockedBy: target, blockedGame: incoming.game });
           await sp.client.sendPrivate(target, composeOnlineMessage('invite', game));
           this.trackInvite({ direction: 'out', peer: target, game, at: nowIso(this.opts.timezone), status: 'pending' });
           return JSON.stringify({ sent: true, game, target, note: '已发出邀约;对方接受后对方机器先当庄(每手轮换),会话筹码独立于本地。' });
