@@ -713,6 +713,13 @@ export class CasinoWorld implements World {
       const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
       if (!target) return;
       target.status = 'accepted';
+      // 双向互邀竞态仲裁:双方互发邀约又互发 accept 时,两边都会走到这里各建庄家会话。
+      // 确定性规则:botId 小的一方坐庄;大的一方不建会话,等对方 start(case 'start' 建客座会话)。
+      const mutual = sp.invites.some((i) => i.direction === 'in' && i.peer === peer && (i.status === 'pending' || i.status === 'accepted'));
+      if (mutual && this.myBotId() > peer) {
+        push('casino.online_state', `[星邮联机] 双方互发了邀约,按 ID 仲裁由 ${peer} 坐庄;等待对方开局。`);
+        return;
+      }
       // 我是庄家(邀约发出方):创建会话、筹码账本与引擎,开局。
       const startChips = this.opts.cfg.startChips;
       const myId = this.myBotId();
@@ -738,6 +745,18 @@ export class CasinoWorld implements World {
     if (session && session.peer === peer) session.lastIncomingAt = Date.now();
     switch (msg.action) {
       case 'start': {
+        // 双向开局仲裁(最终裁决):双方互 accept 后会各建庄家会话、各发一份 start——
+        // 收到对方 start 时,botId 小者保留自己的庄家会话并忽略对方;大者废弃自己的庄家会话,采纳对方的 start 降级为客座。
+        // 此规则不依赖邀约记录,无条件收敛到唯一庄家。
+        if (session && session.bank === this.myBotId() && session.engine && session.handsTotal === 0) {
+          if (this.myBotId() < peer) {
+            push('casino.online_state', '[星邮联机] 双方同时开局,按 ID 仲裁:我坐庄,忽略对方的重复开局。');
+            return;
+          }
+          await this.closeOnlineSession('双方同时开局,按 ID 仲裁由对方坐庄', false); // 我降级,不通知对方(对方是庄家)
+          push('casino.online_state', '[星邮联机] 双方同时开局,按 ID 仲裁由对方坐庄;已切换为闲家,等待发牌。');
+        }
+        if (session) return; // 其余情形:已有会话,忽略重复 start
         // 我是客座:对方(庄家)开了会话,凭据里的筹码账本来自消息。
         const chips: Record<string, number> = {};
         const chipsPart = msg.kv.chips ?? '';
@@ -748,12 +767,12 @@ export class CasinoWorld implements World {
         return;
       }
       case 'hand': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:hand 是对方错位发来的(它以为自己是庄家),忽略
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
         return;
       }
       case 'state': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:state 是对方错位发来的,忽略
         session.lastState = msg.kv;
         const kv = msg.kv;
         if (session.game === 'oldmaid') {
@@ -769,7 +788,7 @@ export class CasinoWorld implements World {
         return;
       }
       case 'settle': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:settle 是对方错位发来的,忽略
         session.lastSettle = msg.kv;
         const kv = msg.kv;
         const reason = (() => { try { return decodeURIComponent(kv.reason ?? ''); } catch { return kv.reason ?? ''; } })();
@@ -779,7 +798,7 @@ export class CasinoWorld implements World {
         return;
       }
       case 'handoff': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:handoff 是对方错位发来的,忽略
         // 庄家轮换:我成为新的权威端,按对方传来的筹码账本建引擎。
         const chips: Record<string, number> = {};
         for (const pair of (msg.kv.chips ?? '').split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
@@ -798,13 +817,13 @@ export class CasinoWorld implements World {
         return;
       }
       case 'rest': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:rest 是对方错位发来的,忽略
         const minutes = Number(msg.kv.minutes ?? 5);
         push('casino.online_state', `[星邮联机] 连续对局较多,进入 ${minutes} 分钟休息(防止消耗过大,到点庄家会自动换庄继续)。期间不需要任何操作。`);
         return;
       }
       case 'reject': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank === this.myBotId()) return; // 我是庄家:reject 是对方错位发来的,忽略
         const reason = (() => { try { return decodeURIComponent(msg.kv.reason ?? ''); } catch { return msg.kv.reason ?? ''; } })();
         push('casino.online_state', `[星邮联机] 你的动作被庄家拒绝:${reason}。请根据上一个 state 事件重新行动。`);
         return;
@@ -1404,7 +1423,7 @@ export class CasinoWorld implements World {
           if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game}),先 stop 再回应。` });
           // target 缺省时自动采用最近的待回应邀约(邀约事件已提示带 target,但 AI 忘带时不该死锁)。
           const rawTarget = String(args.target ?? '').trim();
-          let target = /^d{5,12}$/.test(rawTarget) ? rawTarget : '';
+          let target = /^\d{5,12}$/.test(rawTarget) ? rawTarget : '';
           if (!target) {
             const pend = sp.invites.filter((i) => i.direction === 'in' && i.status === 'pending').at(-1);
             if (!pend) return JSON.stringify({ error: '没有待回应的邀约。' });
@@ -1417,7 +1436,14 @@ export class CasinoWorld implements World {
           return JSON.stringify({ accepted: true, game: pending.game, target, note: '意向已互认,对方(首任庄家)将开局;对局状态以事件通知你,你的动作用 casino_online act 发送。' });
         }
         case 'decline': {
-          const target = targetOf();
+          // target 缺省时自动采用最近的待回应邀约(与 accept 同规则,防死锁)。
+          const rawTarget = String(args.target ?? '').trim();
+          let target = /^\d{5,12}$/.test(rawTarget) ? rawTarget : '';
+          if (!target) {
+            const pend = sp.invites.filter((i) => i.direction === 'in' && i.status === 'pending').at(-1);
+            if (!pend) return JSON.stringify({ error: '没有待回应的邀约。' });
+            target = pend.peer;
+          }
           const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
           if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
           await sp.client.sendPrivate(target, composeOnlineMessage('decline', pending.game));
