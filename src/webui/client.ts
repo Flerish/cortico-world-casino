@@ -242,6 +242,47 @@ function showError(ctx: WebUiPanelContext, message: string): void {
   if (box) box.textContent = message;
 }
 
+/** 观战视图:两位 AI 的 21 点牌局实况(庄家端权威明细 / 客座端状态缓存)。 */
+function renderSpectate(card: HTMLElement, spec: Record<string, any>, T: PanelText): void {
+  card.replaceChildren();
+  const head = el('div', 'online-friends-title', T.online.spectateTitle);
+  card.append(head);
+  if (spec.state === 'idle') { card.append(el('div', 'lobby-empty', T.online.spectateIdle)); return; }
+  const gameName = spec.game === 'blackjack' ? T.online.gameBlackjack : spec.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem;
+  card.append(el('div', 'spec-sub', `${gameName} · ${T.online.handsLabel} ${spec.hands ?? 0} · ${T.online.chipsMe} ${spec.chipsMe ?? '?'} / ${T.online.chipsPeer} ${spec.chipsPeer ?? '?'}`));
+  if (spec.resting) card.append(el('div', 'spec-rest', T.online.restHint));
+
+  /** 牌面:♠♥♦♣ 着色。 */
+  const cardEl = (c: string): HTMLElement => {
+    const red = c.includes('♥') || c.includes('♦');
+    return el('span', red ? 'spec-card spec-red' : 'spec-card', c);
+  };
+  const bankLabel = spec.iAmBank ? T.online.selfSide : spec.peer;
+  card.append(el('div', 'spec-section', `${T.online.bankLabel}(${bankLabel})`));
+  const dealerRow = el('div', 'spec-cards');
+  const dealerCards: string[] = Array.isArray(spec.dealerCards) && spec.dealerCards.length ? spec.dealerCards : (spec.dealerUpCard ? [spec.dealerUpCard] : []);
+  if (dealerCards.length) for (const c of dealerCards) dealerRow.append(cardEl(c));
+  else dealerRow.append(el('span', 'spec-total', `${T.online.dealerUpLabel} ${spec.dealerUpTotal ?? '?'}`));
+  card.append(dealerRow);
+
+  const playerLabel = spec.iAmBank ? spec.peer : T.online.selfSide;
+  card.append(el('div', 'spec-section', `${T.online.playerLabel}(${playerLabel})`));
+  const playerRow = el('div', 'spec-cards');
+  for (const c of (spec.playerCards ?? [])) playerRow.append(cardEl(c));
+  if (!(spec.playerCards ?? []).length) playerRow.append(el('span', 'spec-total', `${T.online.totalLabel} ${spec.playerTotal ?? '?'}`));
+  card.append(playerRow);
+  card.append(el('div', 'spec-sub', `${T.online.betLabel} ${spec.bet ?? '—'}`));
+
+  const settle = spec.lastSettle;
+  if (settle) {
+    const reason = (() => { try { return decodeURIComponent(settle.reason ?? ''); } catch { return settle.reason ?? ''; } })();
+    const win = settle.result === 'push' ? T.online.resultPush : settle.result === 'player' ? T.online.resultPlayer : T.online.resultBank;
+    card.append(el('div', 'spec-result', `${T.online.lastResult} ${win} · ${reason}`));
+  } else if (spec.phase === 'awaitBet') {
+    card.append(el('div', 'spec-sub', T.online.phaseAwaitBet));
+  }
+}
+
 async function send(ctx: WebUiPanelContext, T: PanelText, action: string, extra: Record<string, unknown> = {}): Promise<void> {
   try {
     const state = await ctx.invoke<Snapshot>('action', [{ action, ...extra }]);
@@ -262,6 +303,8 @@ const ui = {
   lobbyMode: 'menu' as 'menu' | 'local' | 'online',
   /** 联机页 1s 状态轮询句柄;离开联机页即清除,避免后台消耗。 */
   onlineTimer: null as number | null,
+  /** 观战模式:点左侧 AI 名字进入,看两位 AI 的牌局实况;再点返回好友列表。 */
+  spectate: false,
 };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
@@ -415,6 +458,16 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .friend-invite { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); background: rgba(255,255,255,.6); font-size: 15px; line-height: 1; cursor: pointer; font-weight: 700; }
     .friend-invite:hover { background: rgba(212,175,55,.3); }
     .online-game-row { flex-wrap: wrap; }
+    .online-status-clickable { cursor: pointer; }
+    .online-status-clickable:hover { opacity: .75; text-decoration: underline; }
+    .spec-section { font-size: 12px; font-weight: 700; opacity: .8; margin-top: 6px; }
+    .spec-cards { display: flex; gap: 6px; flex-wrap: wrap; min-height: 30px; align-items: center; }
+    .spec-card { display: inline-flex; padding: 4px 8px; border-radius: 6px; background: rgba(255,255,255,.75); border: 1px solid rgba(0,0,0,.2); font-size: 14px; font-weight: 700; }
+    .spec-red { color: #c0392b; }
+    .spec-total { font-size: 13px; opacity: .8; }
+    .spec-sub { font-size: 12px; opacity: .8; margin-top: 4px; }
+    .spec-rest { font-size: 12px; color: #4682b4; margin-top: 4px; }
+    .spec-result { font-size: 12px; font-weight: 700; color: #b8860b; margin-top: 6px; }
     .lobby-suits { font-size: 15px; letter-spacing: 10px; text-indent: 10px; }
     .lobby-suits .ls-black { color: #eae4d2; }
     .lobby-suits .ls-red { color: #f0a3a3; }
@@ -614,7 +667,11 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         const statusLabel = data.status === 'resting' ? T.online.statusResting
           : data.status === 'playing' ? T.online.statusPlaying : T.online.statusIdle;
         const statusCls = data.status === 'resting' ? 'online-badge-rest' : data.status === 'playing' ? 'online-badge-play' : 'online-badge-idle';
-        statusCard.append(el('div', 'online-status-title', T.online.statusTitle));
+        const statusTitle = el('div', 'online-status-title' + (data.status !== 'idle' ? ' online-status-clickable' : ''), T.online.statusTitle);
+        if (data.status !== 'idle') {
+          statusTitle.addEventListener('click', () => { ui.spectate = !ui.spectate; void refresh(); }, { signal: ctx.signal });
+        }
+        statusCard.append(statusTitle);
         statusCard.append(el('span', `online-badge ${statusCls}`, statusLabel));
         statusCard.append(el('div', 'online-status-line', `${T.online.selfId} ${data.myBotId ?? data.botId ?? T.online.unknown}`));
         if (data.status !== 'idle' && data.session) {
@@ -626,8 +683,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           if (data.status === 'resting') statusCard.append(el('div', 'online-status-line', T.online.restHint));
           const stop = el('button', 'online-stop', T.online.stopBtn);
           stop.type = 'button';
-          stop.addEventListener('click', () => {
-            void send(ctx, T, 'online-stop');
+          stop.addEventListener('click', async () => {
+            try { await ctx.invoke('action', [{ action: 'online-stop' }]); } catch (err) { showError(ctx, err instanceof Error ? err.message : String(err)); }
+            void refresh();
           }, { signal: ctx.signal });
           statusCard.append(stop);
         } else if (data.enabled === false) {
@@ -641,7 +699,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         } else {
           statusCard.append(el('div', 'online-status-line', T.online.idleHint));
         }
-        // 右:好友列表(对局中黄点、在线绿点、离线灰点;列表已按在线优先排序)。
+        // 右栏:观战模式显示牌局实况;否则好友列表(黄/绿/灰点,在线优先)。
+        if (ui.spectate && data.status !== 'idle') {
+          let spec: Record<string, any>;
+          try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = { state: 'idle' }; }
+          if (spec) { renderSpectate(friendsCard, spec as Record<string, any>, T); return; }
+        }
         friendsCard.querySelectorAll('.friend-row').forEach((n) => n.remove());
         const friends = (data.friends ?? []) as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
         if (!friends.length) {
@@ -666,9 +729,10 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
             for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem]] as const) {
               const gb = el('button', 'primary', label);
               gb.type = 'button';
-              gb.addEventListener('click', () => {
+              gb.addEventListener('click', async () => {
                 overlay.remove();
-                void send(ctx, T, 'online-invite', { target: f.id, game: g });
+                try { await ctx.invoke('action', [{ action: 'online-invite', target: f.id, game: g }]); } catch (err) { showError(ctx, err instanceof Error ? err.message : String(err)); }
+                void refresh();
               }, { signal: ctx.signal });
               gRow.append(gb);
             }

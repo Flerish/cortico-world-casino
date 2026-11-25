@@ -228,6 +228,10 @@ export interface OnlineSessionShape {
   handsTotal: number;
   /** 长休截止时间戳(休眠中时面板显示休息中)。 */
   restUntil?: number;
+  /** 最近一次 state 消息参数(kv,观战视图用;双方都缓存)。 */
+  lastState: Record<string, string> | null;
+  /** 最近一次 settle 消息参数(kv,观战视图用)。 */
+  lastSettle: Record<string, string> | null;
 }
 
 export class CasinoWorld implements World {
@@ -441,6 +445,13 @@ export class CasinoWorld implements World {
     if (sp.invites.length > 20) sp.invites.length = 20;
   }
 
+  /** 参数体(tokens 形如 k=v)转 kv 对象。 */
+  private kvFromParts(parts: string[]): Record<string, string> {
+    const kv: Record<string, string> = {};
+    for (const t of parts) { const i = t.indexOf('='); if (i > 0) kv[t.slice(0, i)] = t.slice(i + 1); }
+    return kv;
+  }
+
   /** 联机私信发送(会话内使用)。 */
   private async onlineSend(peer: string, line: string): Promise<void> {
     await this.starpost!.client.sendPrivate(peer, line);
@@ -537,6 +548,7 @@ export class CasinoWorld implements World {
       else if (act === 'double') engine.double();
       else throw new Error(`未知动作 ${act}(可用 bet/hit/stand/double)`);
       if (engine.phase === 'player') {
+        session.lastState = this.kvFromParts(engine.stateParts());
         await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
         this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方行动后:${engine.handDetail()}`, at);
         return;
@@ -554,6 +566,8 @@ export class CasinoWorld implements World {
   private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack, at: string): Promise<void> {
     session.chips[session.bank] = engine.chips.bank;
     session.chips[session.peer] = engine.chips.player;
+    session.lastState = this.kvFromParts(engine.stateParts());
+    session.lastSettle = this.kvFromParts(engine.settleParts());
     await this.onlineSend(session.peer, onlineLine('settle', engine.settleParts()));
     const s2 = engine.lastSettle!;
     const bankIsMe = session.bank === this.myBotId();
@@ -594,7 +608,7 @@ export class CasinoWorld implements World {
         dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
         deck: this.opts.starpostEngineDeck,
       });
-      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0 };
+      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null };
       await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
       push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
@@ -616,7 +630,7 @@ export class CasinoWorld implements World {
         const chips: Record<string, number> = {};
         const chipsPart = msg.kv.chips ?? '';
         for (const pair of chipsPart.split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
-        sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0 };
+        sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0, lastState: null, lastSettle: null };
         push('casino.online_session', `[星邮联机] ${peer} 的 ${sp.session.game} 联机会话已开启(你是闲家,庄家每手轮换)。等待庄家发手,收到下注请求后用 casino_online 的 act bet X 下注。`);
         return;
       }
@@ -627,12 +641,14 @@ export class CasinoWorld implements World {
       }
       case 'state': {
         if (!session || session.peer !== peer) return;
+        session.lastState = msg.kv;
         const kv = msg.kv;
         push('casino.online_state', `[星邮联机] 轮到你行动:你的点数 ${kv.total ?? '?'} · 庄家明牌 ${kv.dealerUp ?? '?'} · 押注 ${kv.bet ?? '?'} · 可用动作 ${kv.actions ?? '?'}。用 casino_online 的 act(hit/stand/double)行动。`);
         return;
       }
       case 'settle': {
         if (!session || session.peer !== peer) return;
+        session.lastSettle = msg.kv;
         const kv = msg.kv;
         const reason = (() => { try { return decodeURIComponent(kv.reason ?? ''); } catch { return kv.reason ?? ''; } })();
         const chips = (kv.chips ?? '?:?').split(':');
@@ -648,6 +664,8 @@ export class CasinoWorld implements World {
         session.chips = chips;
         session.bank = this.myBotId();
         session.handsTotal = msg.kv.hands ? Number(msg.kv.hands) : session.handsTotal;
+        session.lastState = null;
+        session.lastSettle = null;
         session.engine = new RemoteBlackjack({
           bankChips: chips[this.myBotId()] ?? this.opts.cfg.startChips,
           playerChips: chips[session.peer] ?? this.opts.cfg.startChips,
@@ -1006,6 +1024,46 @@ export class CasinoWorld implements World {
       if (sp) sp.lastError = message;
       return JSON.stringify({ error: message, failed: true });
     }
+  }
+
+  /** 观战快照:点左侧 AI 名字进入;庄家端给权威明细,客座端给最近收到的状态缓存。 */
+  private spectateSnapshot(): Record<string, unknown> {
+    const session = this.starpost?.session;
+    if (!session) return { state: 'idle' };
+    const myId = this.myBotId();
+    const out: Record<string, unknown> = {
+      state: 'active',
+      game: session.game,
+      peer: session.peer,
+      bank: session.bank,
+      iAmBank: session.bank === myId,
+      hands: session.handsTotal,
+      chipsMe: session.chips[myId] ?? null,
+      chipsPeer: session.chips[session.peer] ?? null,
+      resting: Boolean(session.restUntil && Date.now() < session.restUntil),
+      lastSettle: session.lastSettle,
+    };
+    const engine = session.engine;
+    if (engine) {
+      // 我持有权威端:完整明细。
+      out.phase = engine.phase;
+      out.bet = engine.bet;
+      out.playerTotal = engine.playerTotal();
+      out.dealerUpTotal = engine.dealerUpTotal();
+      out.playerCards = engine.hand ? engine.hand.playerCards.map((c) => formatCard(c)) : [];
+      out.dealerUpCard = engine.hand ? formatCard(engine.hand.dealerCards[0]!) : null;
+      out.dealerCards = engine.hand && !engine.hand.holeHidden ? engine.hand.dealerCards.map((c) => formatCard(c)) : [];
+    } else if (session.lastState) {
+      // 客座端:来自对方 state 消息的缓存(闲家牌已在 cards 参数里)。
+      out.phase = session.lastState.actions && session.lastState.actions !== 'none' ? 'player' : 'unknown';
+      out.bet = session.lastState.bet ?? null;
+      out.playerTotal = session.lastState.total ?? null;
+      out.dealerUpTotal = session.lastState.dealerUp ?? null;
+      out.playerCards = session.lastState.cards ? session.lastState.cards.split(',') : [];
+      out.dealerUpCard = null;
+      out.dealerCards = [];
+    }
+    return out;
   }
 
   /** 面板联机页快照:本地 AI 状态 + 好友列表(带在线/对局标记)。 */
@@ -2139,6 +2197,7 @@ export class CasinoWorld implements World {
     if (method === 'state') return this.snapshot();
     if (method === 'history') return { history: this.state.blackjack?.history ?? [], matches: this.matches };
     if (method === 'online') return this.onlineSnapshot();
+    if (method === 'spectate') return this.spectateSnapshot();
     if (method !== 'action') throw new Error(`unknown method ${method}`);
     const arg = (args[0] ?? {}) as Record<string, unknown>;
     const action = String(arg.action ?? '');

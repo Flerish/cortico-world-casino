@@ -160,13 +160,14 @@ export class RemoteBlackjack {
   /** 闲家视角的手牌摘要(庄家只亮明牌)——即协议 state 消息的参数体。 */
   stateParts(): string[] {
     const h = this.hand!;
-    return [`total=${handValue(h.playerCards).total}`, `dealerUp=${handValue([h.dealerCards[0]!]).total}`, `bet=${h.bet}`, `actions=${this.availableActions().join(',') || 'none'}`];
+    return [`total=${handValue(h.playerCards).total}`, `dealerUp=${handValue([h.dealerCards[0]!]).total}`, `bet=${h.bet}`, `cards=${h.playerCards.map((c) => formatCard(c)).join(',')}`, `actions=${this.availableActions().join(',') || 'none'}`];
   }
 
-  /** 结算通报——协议 settle 消息的参数体。 */
+  /** 结算通报——协议 settle 消息的参数体(settle 即亮庄家牌,观战可见)。 */
   settleParts(): string[] {
     const s = this.lastSettle!;
-    return [`result=${s.winner}`, `delta=${s.delta >= 0 ? '+' : ''}${s.delta}`, `chips=${s.bankChips}:${s.playerChips}`, `hands=${this.handsPlayed}`, `reason=${encodeURIComponent(s.reason)}`];
+    const h = this.hand!;
+    return [`result=${s.winner}`, `delta=${s.delta >= 0 ? '+' : ''}${s.delta}`, `chips=${s.bankChips}:${s.playerChips}`, `hands=${this.handsPlayed}`, `dealer=${h.dealerCards.map((c) => formatCard(c)).join(',')}`, `reason=${encodeURIComponent(s.reason)}`];
   }
 
   /** 手牌明细(庄家端事件文本用)。 */
