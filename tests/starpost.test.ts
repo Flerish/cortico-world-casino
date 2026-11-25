@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { StarpostClient, StarpostError, type StarpostPost } from '../src/starpost-client.ts';
 import { parseOnlineMessage, composeOnlineMessage } from '../src/online-protocol.ts';
 import { RemoteBlackjack } from '../src/remote-blackjack.ts';
+import { RemoteOldMaid } from '../src/remote-oldmaid.ts';
+import { RemoteHoldem } from '../src/remote-holdem.ts';
 import { CASINO_TOOL_DECLS, CasinoWorld } from '../src/world.ts';
 import { CASINO } from '../src/definition.ts';
 import { fakeWorldContext } from 'cortico/extensions/dry-mount.ts';
@@ -252,6 +254,80 @@ describe('牌桌 × 星邮集成', () => {
     const stopped = await worldAny.handleInvoke('table', 'action', [{ action: 'online-stop' }]);
     expect((stopped as any).error).toBeDefined();
     await world.stop();
+  });
+
+  it('远程抽鬼牌引擎:发牌弃对、轮流抽牌、空手者胜、先后手轮换', () => {
+    // 牌序(尾部先发):藏一张后,先手玩家连摸 10,K → 弃对;庄家摸 5,9。
+    const engine = new RemoteOldMaid({ stake: 10, bankChips: 100, playerChips: 100, deck: [{ rank: 3, suit: 0 }, { rank: 3, suit: 1 }, { rank: 5, suit: 2 }, { rank: 5, suit: 3 }, { rank: 7, suit: 0 }, { rank: 9, suit: 1 }] });
+    engine.startHand();
+    expect(engine.state!.firstDrawer).toBe('player'); // 第 0 局先手=玩家
+    expect(engine.state!.playerHand.length).toBe(3);  // [7,5,3](发牌交错,无初始对)
+    expect(engine.state!.bankHand.length).toBe(2);    // [5,3]
+    expect(engine.state!.turn).toBe('player');
+    // 轮流抽牌直到有人空手(空手者赢);庄家自动回抽,先后手交替。
+    let flipped = 0;
+    while (!engine.state!.done) {
+      const before = engine.state!.turn;
+      if (engine.state!.turn === 'player') engine.playerDraws(); else engine.bankDraws();
+      if (!engine.state!.done && engine.state!.turn !== before) flipped++;
+    }
+    expect(engine.phase).toBe('done');
+    expect(flipped).toBeGreaterThan(0); // 先后手确实交替
+    const s2 = engine.lastSettle!;
+    expect(s2.winner === 'player' || s2.winner === 'bank').toBe(true);
+    // 第二局先手轮换为庄家。
+    engine.startHand();
+    expect(engine.state!.firstDrawer).toBe('bank');
+  });
+
+  it('远程德州引擎:盲注轮换、跟注过牌、街推进、摊牌比牌', () => {
+    // 固定牌序(尾部先发):底牌庄家 [K,K](两张 K)、玩家 [Q,Q];公共牌会补齐 5 张。
+    const deck = [
+      { rank: 2, suit: 0 }, { rank: 3, suit: 1 }, // 公共牌尾部两张(turn/river 补)
+      { rank: 4, suit: 2 }, { rank: 5, suit: 3 }, { rank: 6, suit: 0 }, { rank: 7, suit: 1 }, { rank: 8, suit: 2 }, // flop 3 + turn
+      { rank: 12, suit: 0 }, { rank: 12, suit: 1 }, { rank: 13, suit: 0 }, { rank: 13, suit: 1 }, // 发牌顺序:庄家 K,Q? 谨慎:尾部先发
+    ];
+    // 简化:不追求具体大牌型,只验证流程与筹码守恒。
+    const engine = new RemoteHoldem({ bigBlind: 10, bankChips: 500, playerChips: 500, deck });
+    engine.startHand();
+    expect(engine.phase).toBe('bank'); // 第 0 手按钮=庄家(小盲)先行动
+    expect(engine.state!.seats.bank.street).toBe(5);  // 小盲 5
+    expect(engine.state!.seats.player.street).toBe(10); // 大盲 10
+    // 庄家(小盲)跟注补齐 → 大盲还有 option(可 check/raise,两人桌标准)。
+    engine.bankAct('call');
+    expect(engine.state!.street).toBe('preflop');
+    expect(engine.state!.turn).toBe('player');
+    // 玩家过牌 → 双方匹配且行动过 → 发 flop → 轮到非按钮方(玩家)
+    engine.playerAct('check');
+    expect(engine.state!.street).toBe('flop');
+    expect(engine.state!.turn).toBe('player');
+    // 玩家过牌 → 庄家过牌 → turn 街
+    engine.playerAct('check');
+    expect(engine.state!.turn).toBe('bank');
+    engine.bankAct('check');
+    expect(engine.state!.street).toBe('turn');
+    // 玩家下注 20 → 庄家跟 → river → 双方过牌 → 摊牌
+    engine.playerAct('bet', 20);
+    engine.bankAct('call', undefined);
+    expect(engine.state!.street).toBe('river');
+    engine.playerAct('check');
+    engine.bankAct('check');
+    expect(engine.phase).toBe('done');
+    // 筹码守恒:两边之和 = 初始 1000(全进池又分给赢家)。
+    expect(engine.chips.bank + engine.chips.player).toBe(1000);
+    expect(engine.handsPlayed).toBe(1);
+  });
+
+  it('远程德州引擎:弃牌即终局,胜者收池', () => {
+    const engine = new RemoteHoldem({ bigBlind: 10, bankChips: 500, playerChips: 500, deck: [{ rank: 2, suit: 0 }, { rank: 3, suit: 1 }, { rank: 13, suit: 0 }, { rank: 13, suit: 1 }] });
+    engine.startHand();
+    engine.bankAct('call');
+    engine.playerAct('fold');
+    expect(engine.phase).toBe('done');
+    const s = engine.lastSettle!;
+    expect(s.winner).toBe('bank');
+    expect(s.reason).toContain('弃牌');
+    expect(engine.chips.bank + engine.chips.player).toBe(1000);
   });
 
   it('远程 21 点引擎:自然黑杰克 1.5 倍结算', () => {

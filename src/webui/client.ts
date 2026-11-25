@@ -273,6 +273,20 @@ function renderSpectate(card: HTMLElement, spec: Record<string, any>, T: PanelTe
   card.append(playerRow);
   card.append(el('div', 'spec-sub', `${T.online.betLabel} ${spec.bet ?? '—'}`));
 
+  if (Array.isArray(spec.rows)) {
+    for (const [label, value] of spec.rows as Array<[string, unknown]>) {
+      card.append(el('div', 'spec-sub', `${label}: ${value}`));
+    }
+  }
+  if (Array.isArray(spec.cardGroups)) {
+    for (const g of spec.cardGroups as Array<{ label: string; cards: string[] }>) {
+      card.append(el('div', 'spec-section', g.label));
+      const row = el('div', 'spec-cards');
+      for (const c of g.cards) row.append(cardEl(c));
+      if (!g.cards.length) row.append(el('span', 'spec-total', T.online.spectateEmpty));
+      card.append(row);
+    }
+  }
   const settle = spec.lastSettle;
   if (settle) {
     const reason = (() => { try { return decodeURIComponent(settle.reason ?? ''); } catch { return settle.reason ?? ''; } })();

@@ -164,9 +164,10 @@ export class RemoteBlackjack {
   }
 
   /** 结算通报——协议 settle 消息的参数体(settle 即亮庄家牌,观战可见)。 */
-  settleParts(): string[] {
-    const s = this.lastSettle!;
-    const h = this.hand!;
+  settleParts(): string[] | null {
+    if (!this.lastSettle || !this.hand) return null;
+    const s = this.lastSettle;
+    const h = this.hand;
     return [`result=${s.winner}`, `delta=${s.delta >= 0 ? '+' : ''}${s.delta}`, `chips=${s.bankChips}:${s.playerChips}`, `hands=${this.handsPlayed}`, `dealer=${h.dealerCards.map((c) => formatCard(c)).join(',')}`, `reason=${encodeURIComponent(s.reason)}`];
   }
 

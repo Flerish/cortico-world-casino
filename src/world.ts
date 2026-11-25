@@ -27,6 +27,8 @@ import { casinoConfigGroup, type CasinoConfigSection } from './config.ts';
 import { StarpostClient, type StarpostMessage } from './starpost-client.ts';
 import { parseOnlineMessage, onlineLine, composeOnlineMessage, ONLINE_GAMES, type OnlineGame, type OnlineInvite, type OnlineMessage } from './online-protocol.ts';
 import { RemoteBlackjack } from './remote-blackjack.ts';
+import { RemoteOldMaid } from './remote-oldmaid.ts';
+import { RemoteHoldem, type RemoteHoldemAct } from './remote-holdem.ts';
 import { modelText, readModelLanguage, readOwnerLabel, type ModelText } from './model-text.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
@@ -223,7 +225,7 @@ export interface OnlineSessionShape {
   peer: string;
   chips: Record<string, number>;
   bank: string;
-  engine: RemoteBlackjack | null;
+  engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem | null;
   timers: Array<ReturnType<typeof setTimeout>>;
   handsTotal: number;
   /** 最近一次收到对方会话消息的时间戳(超时自动结束的依据)。 */
@@ -452,6 +454,18 @@ export class CasinoWorld implements World {
     if (sp.invites.length > 20) sp.invites.length = 20;
   }
 
+  /** 按游戏建远程引擎;测试牌序仅注入 21 点(其余用 rng)。 */
+  private newRemoteEngine(game: OnlineGame, startChips: number): RemoteBlackjack | RemoteOldMaid | RemoteHoldem {
+    if (game === 'oldmaid') return new RemoteOldMaid({ stake: this.opts.cfg.minBet, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
+    if (game === 'holdem') return new RemoteHoldem({ bigBlind: this.opts.cfg.holdemBlind, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
+    return new RemoteBlackjack({
+      bankChips: startChips, playerChips: startChips,
+      minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
+      dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
+      deck: this.opts.starpostEngineDeck,
+    });
+  }
+
   /** 参数体(tokens 形如 k=v)转 kv 对象。 */
   private kvFromParts(parts: string[]): Record<string, string> {
     const kv: Record<string, string> = {};
@@ -534,8 +548,34 @@ export class CasinoWorld implements World {
     const session = sp.session!;
     const engine = session.engine;
     if (!engine) { void this.onlineSend(session.peer, onlineLine('reject', ['reason=no_engine'])); return; }
+    session.lastIncomingAt = Date.now();
     const at = nowIso(this.opts.timezone);
     const act = (tokens[0] ?? '').toLowerCase();
+    if (session.game === 'oldmaid') return await this.bankApplyOldMaidAct(session, engine as RemoteOldMaid, act, at);
+    if (session.game === 'holdem') return await this.bankApplyHoldemAct(session, engine as RemoteHoldem, act, tokens[1], at);
+    return await this.bankApplyBlackjackAct(session, engine as RemoteBlackjack, act, tokens, at);
+  }
+
+  /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
+  private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem, at: string): Promise<void> {
+    session.chips[session.bank] = engine.chips.bank;
+    session.chips[session.peer] = engine.chips.player;
+    session.lastState = this.kvFromParts(engine.stateParts());
+    const settleBody = engine.settleParts();
+    if (settleBody) {
+      session.lastSettle = this.kvFromParts(settleBody);
+      await this.onlineSend(session.peer, onlineLine('settle', settleBody));
+    }
+    const s2 = engine.lastSettle!;
+    const bankIsMe = session.bank === this.myBotId();
+    const myDelta = bankIsMe ? (s2.winner === 'bank' ? -s2.delta : s2.winner === 'player' ? s2.delta : 0) : (s2.winner === 'player' ? -s2.delta : s2.winner === 'bank' ? s2.delta : 0);
+    const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'player') === bankIsMe ? '我赢' : '我输');
+    this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
+    session.handsTotal++;
+    this.bankScheduleNext();
+  }
+  /** 21 点:庄家端处理客座动作(bet/hit/stand/double)。 */
+  private async bankApplyBlackjackAct(session: OnlineSessionShape, engine: RemoteBlackjack, act: string, tokens: string[], at: string): Promise<void> {
     try {
       if (act === 'bet') {
         if (engine.phase !== 'awaitBet') throw new Error('现在不是下注时机');
@@ -543,7 +583,8 @@ export class CasinoWorld implements World {
         const err = engine.betError(bet);
         if (err) throw new Error(err);
         engine.startHand(bet);
-        const phaseNow: 'player' | 'dealer' | 'done' = engine.phase as 'player' | 'dealer' | 'done';
+        const phaseNow: string = engine.phase;
+        session.lastState = this.kvFromParts(engine.stateParts());
         if (phaseNow === 'done') { await this.bankFinishHand(session, engine, at); return; } // 自然黑杰克立即结算
         await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
         this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方押注 ${engine.bet}。${engine.handDetail()}`, at);
@@ -560,7 +601,6 @@ export class CasinoWorld implements World {
         this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方行动后:${engine.handDetail()}`, at);
         return;
       }
-      // 庄家打完已结算:写回筹码账本,发 settle,推本地结果,按节奏安排庄家轮换。
       await this.bankFinishHand(session, engine, at);
     } catch (error) {
       await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent((error as Error).message)}`])).catch(() => {});
@@ -568,22 +608,43 @@ export class CasinoWorld implements World {
     }
   }
 
-  /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
-  /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
-  private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack, at: string): Promise<void> {
-    session.chips[session.bank] = engine.chips.bank;
-    session.chips[session.peer] = engine.chips.player;
-    session.lastState = this.kvFromParts(engine.stateParts());
-    session.lastSettle = this.kvFromParts(engine.settleParts());
-    await this.onlineSend(session.peer, onlineLine('settle', engine.settleParts()));
-    const s2 = engine.lastSettle!;
-    const bankIsMe = session.bank === this.myBotId();
-    const myDelta = bankIsMe ? (s2.winner === 'bank' ? -s2.delta : s2.winner === 'player' ? s2.delta : 0) : (s2.winner === 'player' ? -s2.delta : s2.winner === 'bank' ? s2.delta : 0);
-    const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'player') === bankIsMe ? '我赢' : '我输');
-    this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
-    session.handsTotal++;
-    this.bankScheduleNext();
+  /** 抽鬼牌:客座抽牌 → 庄家自动回抽 → 结算或发新状态。 */
+  private async bankApplyOldMaidAct(session: OnlineSessionShape, engine: RemoteOldMaid, act: string, at: string): Promise<void> {
+    try {
+      if (act !== 'draw') throw new Error('抽鬼牌的动作只有 draw');
+      engine.playerDraws();
+      engine.bankDraws(); // 庄家自动回抽(无选择空间)
+      if (engine.phase === 'done') { await this.bankFinishHand(session, engine, at); return; }
+      session.lastState = this.kvFromParts(engine.stateParts());
+      await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+    } catch (error) {
+      await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent((error as Error).message)}`])).catch(() => {});
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方动作被拒:${(error as Error).message}`, at);
+    }
   }
+
+  /** 德州:庄家本机 AI 的动作直接落引擎(不经过对方)。 */
+  private async bankApplyHoldemAct(session: OnlineSessionShape, engine: RemoteHoldem, act: string, amountRaw: string | undefined, at: string): Promise<void> {
+    try {
+      const amount = amountRaw !== undefined ? Math.floor(Number(amountRaw)) : undefined;
+      engine.bankAct(act as RemoteHoldemAct, amount);
+      await this.afterHoldemAction(session, engine, at);
+    } catch (error) {
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你的动作未生效:${(error as Error).message}`, at);
+    }
+  }
+
+  /** 德州:任一侧动作落定后的统一推进(发 state / 结算 / 提示庄家继续行动)。 */
+  private async afterHoldemAction(session: OnlineSessionShape, engine: RemoteHoldem, at: string): Promise<void> {
+    if (engine.phase === 'done') { await this.bankFinishHand(session, engine, at); return; }
+    session.lastState = this.kvFromParts(engine.stateParts());
+    await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+    if (engine.phase === 'bank') {
+      const toCall = Math.max(0, Number(session.lastState.toCall ?? 0));
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你行动(庄家):街 ${session.lastState.street} · 池 ${session.lastState.pot} · 需跟 ${toCall} · 底牌 ${session.lastState.hole ?? '?'} · 公共牌 ${session.lastState.board ?? '无'}。用 casino_online 的 act(${toCall > 0 ? 'call/raise/fold' : 'bet/check'})行动。`, at);
+    }
+  }
+
   private myBotId(): string { return this.starpost!.client.botId; }
 
   /** 处理 @casino 协议消息:按角色与动作路由;未匹配的静默忽略。 */
@@ -610,12 +671,7 @@ export class CasinoWorld implements World {
       // 我是庄家(邀约发出方):创建会话、筹码账本与引擎,开局。
       const startChips = this.opts.cfg.startChips;
       const myId = this.myBotId();
-      const engine = new RemoteBlackjack({
-        bankChips: startChips, playerChips: startChips,
-        minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
-        dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
-        deck: this.opts.starpostEngineDeck,
-      });
+      const engine = this.newRemoteEngine(target.game, startChips);
       sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
       await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
@@ -652,6 +708,15 @@ export class CasinoWorld implements World {
         if (!session || session.peer !== peer) return;
         session.lastState = msg.kv;
         const kv = msg.kv;
+        if (session.game === 'oldmaid') {
+          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你抽牌' : '庄家抽牌中'}:你 ${kv.yourCount ?? '?'} 张 · 对方 ${kv.oppCount ?? '?'} 张 · 已弃 ${kv.pairs ?? '?'} 对 · 你的手牌 ${kv.cards ?? '?'}。用 casino_online 的 act draw 抽牌。`);
+          return;
+        }
+        if (session.game === 'holdem') {
+          const toCall = Number(kv.toCall ?? 0);
+          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你行动' : '庄家行动中'}:街 ${kv.street} · 池 ${kv.pot} · 需跟 ${toCall} · 底牌 ${kv.hole} · 公共牌 ${kv.board}。用 casino_online 的 act(${toCall > 0 ? 'fold/call/raise' : 'check/bet'})行动。`);
+          return;
+        }
         push('casino.online_state', `[星邮联机] 轮到你行动:你的点数 ${kv.total ?? '?'} · 庄家明牌 ${kv.dealerUp ?? '?'} · 押注 ${kv.bet ?? '?'} · 可用动作 ${kv.actions ?? '?'}。用 casino_online 的 act(hit/stand/double)行动。`);
         return;
       }
@@ -676,13 +741,10 @@ export class CasinoWorld implements World {
         session.lastState = null;
         session.lastSettle = null;
         session.lastIncomingAt = Date.now();
-        session.engine = new RemoteBlackjack({
-          bankChips: chips[this.myBotId()] ?? this.opts.cfg.startChips,
-          playerChips: chips[session.peer] ?? this.opts.cfg.startChips,
-          minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
-          dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
-          deck: this.opts.starpostEngineDeck,
-        });
+        session.engine = this.newRemoteEngine(session.game, 0);
+        // handoff 引擎以交接账本为本手筹码。
+        session.engine.chips.bank = chips[this.myBotId()] ?? this.opts.cfg.startChips;
+        session.engine.chips.player = chips[session.peer] ?? this.opts.cfg.startChips;
         push('casino.online_state', `[星邮联机] 庄家轮换到你(共 ${session.handsTotal} 手)。你现在是庄家,正在请对方下注。`);
         this.bankDealHand();
         return;
@@ -1057,21 +1119,75 @@ export class CasinoWorld implements World {
     if (engine) {
       // 我持有权威端:完整明细。
       out.phase = engine.phase;
-      out.bet = engine.bet;
-      out.playerTotal = engine.playerTotal();
-      out.dealerUpTotal = engine.dealerUpTotal();
-      out.playerCards = engine.hand ? engine.hand.playerCards.map((c) => formatCard(c)) : [];
-      out.dealerUpCard = engine.hand ? formatCard(engine.hand.dealerCards[0]!) : null;
-      out.dealerCards = engine.hand && !engine.hand.holeHidden ? engine.hand.dealerCards.map((c) => formatCard(c)) : [];
+      if (session.game === 'blackjack') {
+        const bj = engine as RemoteBlackjack;
+        out.bet = bj.bet;
+        out.playerTotal = bj.playerTotal();
+        out.dealerUpTotal = bj.dealerUpTotal();
+        out.playerCards = bj.hand ? bj.hand.playerCards.map((c) => formatCard(c)) : [];
+        out.dealerUpCard = bj.hand ? formatCard(bj.hand.dealerCards[0]!) : null;
+        out.dealerCards = bj.hand && !bj.hand.holeHidden ? bj.hand.dealerCards.map((c) => formatCard(c)) : [];
+      } else if (session.game === 'oldmaid') {
+        const om = engine as RemoteOldMaid;
+        const st = om.state!;
+        out.rows = [
+          ['轮到', st.turn === 'player' ? '闲家' : '庄家(我方)'],
+          ['庄家手牌数', st.bankHand.length],
+          ['闲家手牌数', st.playerHand.length],
+          ['已弃对子', st.discards.length],
+          ['本局先手', st.firstDrawer === 'player' ? '闲家' : '庄家(我方)'],
+        ];
+        out.cardGroups = [
+          { label: '庄家手牌(我方视角)', cards: st.bankHand.map((c) => formatCard(c)) },
+          { label: '闲家手牌(我方视角)', cards: st.playerHand.map((c) => formatCard(c)) },
+        ];
+      } else {
+        const hd = engine as RemoteHoldem;
+        const st = hd.state!;
+        out.rows = [
+          ['街', st.street],
+          ['底池', st.pot],
+          ['当前注', st.currentBet],
+          ['按钮位', st.button === 'player' ? '闲家' : '庄家(我方)'],
+          ['庄家筹码', st.seats.bank.chips],
+          ['闲家筹码', st.seats.player.chips],
+        ];
+        out.cardGroups = [
+          { label: '庄家底牌(我方视角)', cards: st.hole.bank.map((c) => formatCard(c)) },
+          { label: '闲家底牌(我方视角)', cards: st.hole.player.map((c) => formatCard(c)) },
+          { label: '公共牌', cards: st.community.map((c) => formatCard(c)) },
+        ];
+      }
     } else if (session.lastState) {
-      // 客座端:来自对方 state 消息的缓存(闲家牌已在 cards 参数里)。
-      out.phase = session.lastState.actions && session.lastState.actions !== 'none' ? 'player' : 'unknown';
-      out.bet = session.lastState.bet ?? null;
-      out.playerTotal = session.lastState.total ?? null;
-      out.dealerUpTotal = session.lastState.dealerUp ?? null;
-      out.playerCards = session.lastState.cards ? session.lastState.cards.split(',') : [];
+      // 客座端:来自对方 state 消息的缓存(闲家自己的牌在 cards/hole 参数里)。
+      const kv = session.lastState;
+      out.phase = kv.actions && kv.actions !== 'none' ? 'player' : 'unknown';
+      out.bet = kv.bet ?? null;
+      out.playerTotal = kv.total ?? null;
+      out.dealerUpTotal = kv.dealerUp ?? null;
+      out.playerCards = kv.cards ? kv.cards.split(',') : [];
       out.dealerUpCard = null;
       out.dealerCards = [];
+      if (session.game === 'oldmaid') {
+        out.rows = [
+          ['轮到', kv.turn === 'you' ? '闲家(我方 AI)' : '庄家'],
+          ['闲家手牌数', kv.yourCount ?? '?'],
+          ['庄家手牌数', kv.oppCount ?? '?'],
+          ['已弃对子', kv.pairs ?? '?'],
+        ];
+        out.cardGroups = [{ label: '闲家手牌(我方视角)', cards: kv.cards && kv.cards !== 'none' ? kv.cards.split(',') : [] }];
+      } else if (session.game === 'holdem') {
+        out.rows = [
+          ['街', kv.street ?? '?'],
+          ['底池', kv.pot ?? '?'],
+          ['需跟', kv.toCall ?? '?'],
+          ['按钮位', kv.button === 'player' ? '闲家' : '庄家'],
+        ];
+        out.cardGroups = [
+          { label: '闲家底牌(我方视角)', cards: kv.hole && kv.hole !== 'none' ? kv.hole.split(',') : [] },
+          { label: '公共牌', cards: kv.board && kv.board !== 'none' ? kv.board.split(',') : [] },
+        ];
+      }
     }
     return out;
   }
@@ -1183,9 +1299,17 @@ export class CasinoWorld implements World {
           const session = sp.session;
           if (!session) return JSON.stringify({ error: '当前没有联机会话。' });
           const act = String(args.act ?? '').toLowerCase();
-          if (!['bet', 'hit', 'stand', 'double'].includes(act)) return JSON.stringify({ error: 'act 须为 bet/hit/stand/double' });
+          const validActs = session.game === 'blackjack' ? ['bet', 'hit', 'stand', 'double'] : session.game === 'oldmaid' ? ['draw'] : ['fold', 'check', 'call', 'bet', 'raise'];
+          if (!validActs.includes(act)) return JSON.stringify({ error: `${session.game} 的动作集:${validActs.join('/')}` });
           if (act === 'bet' && !Number.isSafeInteger(Number(args.amount))) return JSON.stringify({ error: 'bet 需要整数金额(amount)' });
-          const parts = [act, ...(act === 'bet' ? [String(args.amount)] : [])];
+          // 我是庄家:动作直接落本地引擎;否则发协议给庄家。
+          if (session.bank === this.myBotId() && session.engine) {
+            const at = nowIso(this.opts.timezone);
+            if (session.game === 'blackjack') await this.bankApplyBlackjackAct(session, session.engine as RemoteBlackjack, act, [act, ...(act === 'bet' ? [String(args.amount)] : [])], at);
+            else if (session.game === 'holdem') await this.bankApplyHoldemAct(session, session.engine as RemoteHoldem, act, act === 'bet' || act === 'raise' ? String(args.amount ?? '') : undefined, at);
+            return JSON.stringify({ applied: true, act, note: '动作已落到庄家引擎;结果以事件返回。' });
+          }
+          const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : [])];
           await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
           return JSON.stringify({ sent: true, act, note: '动作已发给庄家;结果以 casino.online_state / casino.online_result 事件返回。' });
         }
