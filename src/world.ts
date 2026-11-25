@@ -696,6 +696,7 @@ export class CasinoWorld implements World {
       const myId = this.myBotId();
       const engine = this.newRemoteEngine(target.game, startChips);
       sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
+      sp.invites.length = 0; // 开局清邀约(主人指示)
       console.log(`[casino] 会话建立:我=庄家(${this.myBotId()}) 对手=${peer} 游戏=${target.game}`);
       await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
@@ -791,7 +792,7 @@ export class CasinoWorld implements World {
         return;
       }
       case 'act': {
-        if (!session || session.peer !== peer) return;
+        if (!session || session.peer !== peer || session.bank !== this.myBotId()) return;
         if (session.bank === this.myBotId()) await this.bankApplyAct(msg.tokens);
         return;
       }

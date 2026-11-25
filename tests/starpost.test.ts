@@ -203,9 +203,9 @@ describe('牌桌 × 星邮集成', () => {
     // 会话已开启:state 应报告角色与筹码。
     const st = await tool(world, 'casino_starpost', { action: 'status' });
     expect(st.enabled).toBe(true);
-    // 邀约记录可查(1 条 out 邀约,已 accepted)。
+    // 邀约记录:开局即清空(主人规则——进入牌局后旧邀约一律作废)。
     const list = await tool(world, 'casino_online', { action: 'list' });
-    expect(list.invites.length).toBeGreaterThanOrEqual(1);
+    expect(list.invites.length).toBe(0);
     expect(list.session).toMatchObject({ game: 'blackjack', peer: '67890' });
     await world.stop();
   });
