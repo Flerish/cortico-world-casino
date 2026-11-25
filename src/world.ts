@@ -427,6 +427,9 @@ export class CasinoWorld implements World {
           if ((msg as Record<string, unknown>).interaction === 'poke') continue; // 戳一戳:只作 presence 信号,不推给 AI
           if (conv.kind === 'private') {
             const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
+            // 重放防护:重启后 cursor 重置会重放旧消息,陈旧(>2 分钟)的协议消息一律忽略——
+            // 否则旧的 accept/start 会反复重建幽灵会话,两边都当闲家互相等开局。
+            if (protocol && msg.at && Date.now() - Date.parse(String(msg.at)) > 2 * 60 * 1000) continue;
             if (protocol) { await this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }
           }
           const nickname = msg.senderNickname ? `(${msg.senderNickname})` : '';
