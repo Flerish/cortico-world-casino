@@ -1097,98 +1097,141 @@ export class CasinoWorld implements World {
     }
   }
 
-  /** 观战快照:点左侧 AI 名字进入;庄家端给权威明细,客座端给最近收到的状态缓存。 */
+  /** 观战快照:点左侧 AI 名字进入;返回与本地快照同构的对象,面板直接渲染单机牌桌。
+   * 角色映射:本地 'ai' 位 = 我方 AI,'player' 位 = 对方 AI;牌面泄底原则同本地(庄家端上帝视角,客座端只见自己视角)。 */
   private spectateSnapshot(): Record<string, unknown> {
     const session = this.starpost?.session;
     if (!session) return { state: 'idle' };
     const myId = this.myBotId();
-    const out: Record<string, unknown> = {
-      state: 'active',
-      game: session.game,
-      peer: session.peer,
-      bank: session.bank,
-      iAmBank: session.bank === myId,
-      hands: session.handsTotal,
-      chipsMe: session.chips[myId] ?? null,
-      chipsPeer: session.chips[session.peer] ?? null,
-      resting: Boolean(session.restUntil && Date.now() < session.restUntil),
-      lastSettle: session.lastSettle,
+    const iAmBank = session.bank === myId;
+    const myChips = session.chips[myId] ?? 0;
+    const peerChips = session.chips[session.peer] ?? 0;
+    const seatView = (chips: number) => ({ chips, wins: 0, losses: 0, pushes: 0, net: 0, bankruptcies: 0 });
+    const base = {
+      game: session.game as unknown,
+      pausedGames: [] as string[],
+      gameChips: { blackjack: { ai: myChips, player: peerChips }, holdem: null },
+      ai: seatView(myChips),
+      player: seatView(peerChips),
+      minBet: this.opts.cfg.minBet,
+      maxBet: this.opts.cfg.maxBet,
+      startChips: this.opts.cfg.startChips,
+      dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17,
+      matches: [],
+      spectate: true,
     };
     const engine = session.engine;
-    if (engine) {
-      // 我持有权威端:完整明细。
-      out.phase = engine.phase;
-      if (session.game === 'blackjack') {
-        const bj = engine as RemoteBlackjack;
-        out.bet = bj.bet;
-        out.playerTotal = bj.playerTotal();
-        out.dealerUpTotal = bj.dealerUpTotal();
-        out.playerCards = bj.hand ? bj.hand.playerCards.map((c) => formatCard(c)) : [];
-        out.dealerUpCard = bj.hand ? formatCard(bj.hand.dealerCards[0]!) : null;
-        out.dealerCards = bj.hand && !bj.hand.holeHidden ? bj.hand.dealerCards.map((c) => formatCard(c)) : [];
-      } else if (session.game === 'oldmaid') {
-        const om = engine as RemoteOldMaid;
-        const st = om.state!;
-        out.rows = [
-          ['轮到', st.turn === 'player' ? '闲家' : '庄家(我方)'],
-          ['庄家手牌数', st.bankHand.length],
-          ['闲家手牌数', st.playerHand.length],
-          ['已弃对子', st.discards.length],
-          ['本局先手', st.firstDrawer === 'player' ? '闲家' : '庄家(我方)'],
-        ];
-        out.cardGroups = [
-          { label: '庄家手牌(我方视角)', cards: st.bankHand.map((c) => formatCard(c)) },
-          { label: '闲家手牌(我方视角)', cards: st.playerHand.map((c) => formatCard(c)) },
-        ];
-      } else {
-        const hd = engine as RemoteHoldem;
-        const st = hd.state!;
-        out.rows = [
-          ['街', st.street],
-          ['底池', st.pot],
-          ['当前注', st.currentBet],
-          ['按钮位', st.button === 'player' ? '闲家' : '庄家(我方)'],
-          ['庄家筹码', st.seats.bank.chips],
-          ['闲家筹码', st.seats.player.chips],
-        ];
-        out.cardGroups = [
-          { label: '庄家底牌(我方视角)', cards: st.hole.bank.map((c) => formatCard(c)) },
-          { label: '闲家底牌(我方视角)', cards: st.hole.player.map((c) => formatCard(c)) },
-          { label: '公共牌', cards: st.community.map((c) => formatCard(c)) },
-        ];
-      }
-    } else if (session.lastState) {
-      // 客座端:来自对方 state 消息的缓存(闲家自己的牌在 cards/hole 参数里)。
-      const kv = session.lastState;
-      out.phase = kv.actions && kv.actions !== 'none' ? 'player' : 'unknown';
-      out.bet = kv.bet ?? null;
-      out.playerTotal = kv.total ?? null;
-      out.dealerUpTotal = kv.dealerUp ?? null;
-      out.playerCards = kv.cards ? kv.cards.split(',') : [];
-      out.dealerUpCard = null;
-      out.dealerCards = [];
-      if (session.game === 'oldmaid') {
-        out.rows = [
-          ['轮到', kv.turn === 'you' ? '闲家(我方 AI)' : '庄家'],
-          ['闲家手牌数', kv.yourCount ?? '?'],
-          ['庄家手牌数', kv.oppCount ?? '?'],
-          ['已弃对子', kv.pairs ?? '?'],
-        ];
-        out.cardGroups = [{ label: '闲家手牌(我方视角)', cards: kv.cards && kv.cards !== 'none' ? kv.cards.split(',') : [] }];
-      } else if (session.game === 'holdem') {
-        out.rows = [
-          ['街', kv.street ?? '?'],
-          ['底池', kv.pot ?? '?'],
-          ['需跟', kv.toCall ?? '?'],
-          ['按钮位', kv.button === 'player' ? '闲家' : '庄家'],
-        ];
-        out.cardGroups = [
-          { label: '闲家底牌(我方视角)', cards: kv.hole && kv.hole !== 'none' ? kv.hole.split(',') : [] },
-          { label: '公共牌', cards: kv.board && kv.board !== 'none' ? kv.board.split(',') : [] },
-        ];
-      }
+
+    if (session.game === 'blackjack') {
+      const bj = engine as RemoteBlackjack;
+      const h = bj.hand;
+      const settle = bj.lastSettle;
+      const aiRole = iAmBank ? 'ai' : 'player';
+      const dealerCards: Card[] = h ? h.dealerCards : [];
+      const playerCards: Card[] = h ? h.playerCards : [];
+      const holeRevealed = h ? !h.holeHidden : Boolean(settle);
+      const dealerVisible = holeRevealed ? dealerCards : dealerCards.slice(0, 1);
+      const outcome: 'win' | 'lose' | 'push' | null = settle ? (settle.winner === 'player' ? 'win' : settle.winner === 'bank' ? 'lose' : 'push') : null;
+      const bet = bj.bet;
+      return {
+        ...base,
+        game: 'blackjack',
+        phase: bj.phase === 'awaitBet' || bj.phase === 'done' ? 'betting' : 'playerActing',
+        round: session.handsTotal + 1,
+        aiRole,
+        bet,
+        insurance: 0,
+        holeRevealed,
+        dealerActing: bj.phase === 'dealer',
+        hands: [{
+          cards: playerCards.map((c) => formatCard(c)),
+          total: playerCards.length ? playerCards.reduce((acc, c) => acc + c.rank, 0) : null,
+          bet,
+          doubled: false,
+          outcome,
+          active: bj.phase === 'player',
+        }],
+        activeHand: 0,
+        dealerCards: dealerVisible.map((c) => formatCard(c)),
+        dealerVisibleTotal: dealerVisible.length ? dealerVisible.reduce((acc, c) => acc + c.rank, 0) : null,
+        dealerTotal: dealerCards.length ? dealerCards.reduce((acc, c) => acc + c.rank, 0) : null,
+        holeCount: dealerCards.length - dealerVisible.length,
+        lastResult: settle ? {
+          dealer: aiRole === 'ai' ? 'ai' : 'player',
+          round: session.handsTotal,
+          bet,
+          hands: [{ cards: [], bet, outcome }],
+          dealerCards: [],
+          insurance: 0,
+          insuranceWon: false,
+          delta: iAmBank ? -settle.delta : settle.delta,
+          surrendered: false,
+          at: nowIso(this.opts.timezone),
+        } : null,
+        history: [],
+      };
     }
-    return out;
+
+    if (session.game === 'oldmaid') {
+      const om = engine as RemoteOldMaid;
+      const st = om.state!;
+      const idlerLocal: 'ai' | 'player' = iAmBank ? 'player' : 'ai';
+      const myHand = iAmBank ? st.bankHand : st.playerHand;
+      const peerHand = iAmBank ? st.playerHand : st.bankHand;
+      const turnOwner = st.turn === 'player' ? idlerLocal : (idlerLocal === 'ai' ? 'player' : 'ai');
+      return {
+        ...base,
+        game: 'oldmaid',
+        turnOwner,
+        winner: null,
+        playerCards: idlerLocal === 'player' ? peerHand.map((c) => formatCard(c)) : myHand.map((c) => formatCard(c)),
+        playerHandCount: idlerLocal === 'player' ? peerHand.length : myHand.length,
+        aiHandCount: idlerLocal === 'ai' ? myHand.length : peerHand.length,
+        discardPairs: st.discards.length,
+        lastDiscards: st.discards.slice(-3).map((pair) => pair.map((c) => formatCard(c))),
+        score: { ai: 0, player: 0 },
+        hiddenCard: null,
+        oldmaidPlays: session.handsTotal,
+        oldmaidHistory: [],
+      };
+    }
+
+    const hd = engine as RemoteHoldem;
+    const st = hd.state!;
+    const myCards = iAmBank ? st.hole.bank : st.hole.player;
+    const peerCards = iAmBank ? st.hole.player : st.hole.bank;
+    const mySeat = iAmBank ? st.seats.bank : st.seats.player;
+    const peerSeat = iAmBank ? st.seats.player : st.seats.bank;
+    const settle = hd.lastSettle;
+    const winner: 'ai' | 'player' | null = settle && settle.winner !== 'push' ? (settle.winner === 'player' ? (iAmBank ? 'player' : 'ai') : (iAmBank ? 'ai' : 'player')) : null;
+    return {
+      ...base,
+      game: 'holdem',
+      phase: st.street === 'showdown' ? 'runout' : st.street,
+      round: session.handsTotal + 1,
+      button: (st.button === 'bank') === iAmBank ? 'ai' : 'player',
+      toAct: st.turn ? (st.turn === 'bank') === iAmBank ? 'ai' : 'player' : null,
+      winner,
+      revealHole: st.street === 'showdown' || Boolean(settle),
+      byFold: settle?.reason.includes('弃牌') ?? false,
+      blinds: { sb: Math.max(1, Math.floor(this.opts.cfg.holdemBlind / 2)), bb: this.opts.cfg.holdemBlind },
+      streetCap: this.opts.cfg.maxBet,
+      currentBet: st.currentBet,
+      minRaise: st.minRaise,
+      pot: st.pot,
+      community: st.community.map((c) => formatCard(c)),
+      playerCards: peerCards.map((c) => formatCard(c)),
+      aiCards: st.street === 'showdown' || Boolean(settle) ? myCards.map((c) => formatCard(c)) : null,
+      aiHoleCount: myCards.length,
+      aiCommitted: mySeat.committed,
+      playerCommitted: peerSeat.committed,
+      aiFolded: mySeat.folded,
+      playerFolded: peerSeat.folded,
+      aiAllIn: mySeat.allIn,
+      playerAllIn: peerSeat.allIn,
+      lastHoldem: null,
+      holdemHistory: [],
+    };
   }
 
   /** 面板联机页快照:本地 AI 状态 + 好友列表(带在线/对局标记)。 */

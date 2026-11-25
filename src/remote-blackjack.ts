@@ -160,7 +160,7 @@ export class RemoteBlackjack {
   /** 闲家视角的手牌摘要(庄家只亮明牌)——即协议 state 消息的参数体。 */
   stateParts(): string[] {
     const h = this.hand!;
-    return [`total=${handValue(h.playerCards).total}`, `dealerUp=${handValue([h.dealerCards[0]!]).total}`, `bet=${h.bet}`, `cards=${h.playerCards.map((c) => formatCard(c)).join(',')}`, `actions=${this.availableActions().join(',') || 'none'}`];
+    return [`total=${handValue(h.playerCards).total}`, `dealerUp=${handValue([h.dealerCards[0]!]).total}`, `up=${formatCard(h.dealerCards[0]!)}`, `bet=${h.bet}`, `cards=${h.playerCards.map((c) => formatCard(c)).join(',')}`, `actions=${this.availableActions().join(',') || 'none'}`];
   }
 
   /** 结算通报——协议 settle 消息的参数体(settle 即亮庄家牌,观战可见)。 */

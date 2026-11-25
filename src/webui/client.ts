@@ -51,6 +51,7 @@ interface MatchView {
 
 interface Snapshot {
   version: number;
+  spectate?: boolean;
   game: 'blackjack' | 'oldmaid' | 'holdem' | null;
   /** 有未完对局的游戏(打开时面板弹「继续/重新开始」)。 */
   pausedGames?: Array<'blackjack' | 'oldmaid' | 'holdem'>;
@@ -597,8 +598,17 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   }
   wrap.append(topbar);
 
+  if (state.spectate && state.game) {
+    const bar = el('div', 'spectate-bar');
+    bar.append(el('span', 'spectate-title', T.online.spectateTitle + ' · ' + (state.game === 'blackjack' ? T.online.gameBlackjack : state.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem)));
+    const exit = el('button', 'online-stop', T.online.spectateExit);
+    exit.type = 'button';
+    exit.addEventListener('click', () => { ui.spectate = false; }, { signal: ctx.signal });
+    bar.append(exit);
+    wrap.prepend(bar);
+  }
   // ── 空桌:主菜单(本地模式 / 联机模式) → 本地模式里是游戏大厅 ──
-  if (state.game !== null) ui.lobbyMode = 'menu';
+  if (state.game !== null && !state.spectate) ui.lobbyMode = 'menu';
   if (ui.lobbyMode !== 'online' && ui.onlineTimer !== null) { clearInterval(ui.onlineTimer); ui.onlineTimer = null; }
   if (state.game === null) {
     const felt = el('div', 'felt lobby');
@@ -717,7 +727,11 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         if (ui.spectate && data.status !== 'idle') {
           let spec: Record<string, any>;
           try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = { state: 'idle' }; }
-          if (spec) { renderSpectate(friendsCard, spec as Record<string, any>, T); return; }
+          if (spec?.snapshot) {
+            // 导入单机牌桌渲染器:远程同构快照整页渲染,1s 轮询持续刷新牌面。
+            render(ctx, spec.snapshot as Snapshot);
+            return;
+          }
         }
         friendsCard.querySelectorAll('.friend-row').forEach((n) => n.remove());
         const friends = (data.friends ?? []) as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
