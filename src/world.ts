@@ -163,7 +163,7 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
   {
     name: 'casino_online',
     description:
-      'Online play over Starpost (requires the Starpost client ready). Actions: "invite" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter\'s machine becomes the host), "accept"/"decline" (respond to an incoming invitation), "act" (in a session: bet with amount / hit / stand / double — send when an online_state event says it is your turn), "stop" (end the session; chips settle as-is), "state" (session summary), "list". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.',
+      'Online play over Starpost (requires the Starpost client ready). Actions: "invite" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter\'s machine becomes the host), "accept"/"decline" (respond to an incoming invitation), "act" (in a session, actions depend on the game — blackjack: bet with amount / hit / stand / double; oldmaid: draw; holdem: fold / check / call / bet with amount / raise with amount — send when an online_state event says it is your turn), "stop" (end the session; chips settle as-is), "state" (session summary), "list". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.',
     tags: ['write'],
     parameters: {
       type: 'object',

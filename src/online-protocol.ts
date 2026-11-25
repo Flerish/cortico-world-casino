@@ -45,9 +45,11 @@ export function parseOnlineMessage(text: string): OnlineMessage | null {
     if (bare.length === 1 && !game) return null;
   } else if (action === 'act') {
     if (!bare.length) return null;
-    if (!['bet', 'hit', 'stand', 'double'].includes(bare[0]!)) return null;
-    if (bare[0] === 'bet' && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
-    if (bare[0] !== 'bet' && bare.length !== 1) return null;
+    // 三游戏全动作集(21点:bet/hit/stand/double;抽鬼牌:draw;德州:fold/check/call/bet/raise)——
+    // 世界层按当前会话游戏校验,解析层只做形态校验。
+    if (!['bet', 'hit', 'stand', 'double', 'draw', 'fold', 'check', 'call', 'raise'].includes(bare[0]!)) return null;
+    if ((bare[0] === 'bet' || bare[0] === 'raise') && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
+    if (bare[0] !== 'bet' && bare[0] !== 'raise' && bare.length !== 1) return null;
   } else if (action === 'hand') {
     if (bare.length) return null; // hand 无裸参数,kv 允许(抽鬼牌开局带闲家手牌)
   } else if (action === 'state') {

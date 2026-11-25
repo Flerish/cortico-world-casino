@@ -143,7 +143,7 @@
     },
     {
       "name": "casino_online",
-      "description": "Online play over Starpost (requires the Starpost client ready). Actions: \"invite\" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter's machine becomes the host), \"accept\"/\"decline\" (respond to an incoming invitation), \"act\" (in a session: bet with amount / hit / stand / double — send when an online_state event says it is your turn), \"stop\" (end the session; chips settle as-is), \"state\" (session summary), \"list\". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.",
+      "description": "Online play over Starpost (requires the Starpost client ready). Actions: \"invite\" (challenge a friend; target = friend botId, game = blackjack/oldmaid/holdem; the inviter's machine becomes the host), \"accept\"/\"decline\" (respond to an incoming invitation), \"act\" (in a session, actions depend on the game — blackjack: bet with amount / hit / stand / double; oldmaid: draw; holdem: fold / check / call / bet with amount / raise with amount — send when an online_state event says it is your turn), \"stop\" (end the session; chips settle as-is), \"state\" (session summary), \"list\". Between hands the host enforces a configurable pause and periodic rests to limit consumption — just wait for events, never spam acts.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -197,8 +197,8 @@
         "write"
       ],
       "summary": {
-        "zh": "联机对局(需星邮客户端就绪):向星邮好友发起对局邀约(邀约方机器当庄)、回应收到的邀约、会话内用 act 下注/要牌/停牌/加倍、stop 终止、state 查会话。局间有节奏停顿与自动长休,等事件就好,别连发动作。",
-        "en": "Online play (Starpost client required): invite a Starpost friend (inviter hosts), respond to invitations, act with bet/hit/stand/double inside a session, stop to end, state for status. The host enforces pacing gaps and periodic rests — wait for events, never spam acts."
+        "zh": "联机对局(需星邮客户端就绪):向星邮好友发起对局邀约(邀约方机器当庄)、回应收到的邀约、会话内按游戏用 act:21 点 bet/要牌/停牌/加倍、抽鬼牌 draw 抽牌、德州 fold/check/call/bet/raise;stop 终止、state 查会话。局间有节奏停顿与自动长休,等事件就好,别连发动作。",
+        "en": "Online play (Starpost client required): invite a Starpost friend (inviter hosts), respond to invitations, act inside a session per game — blackjack: bet/hit/stand/double, oldmaid: draw, holdem: fold/check/call/bet/raise; stop to end, state for status. The host enforces pacing gaps and periodic rests — wait for events, never spam acts."
       }
     },
     {
