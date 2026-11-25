@@ -1614,6 +1614,8 @@ export default {
       async mount(ctx: WebUiPanelContext): Promise<void> {
         ctx.stream({
           message: (text) => {
+            // 联机页有自己的 1s 轮询;本地对局的广播流不在联机页整页重渲染(会打断弹窗与轮询)。
+            if (ui.lobbyMode === 'online') return;
             try {
               render(ctx, JSON.parse(text) as Snapshot);
             } catch {

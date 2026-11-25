@@ -213,7 +213,7 @@ interface StarpostState {
   lastQuota: unknown;
   invites: OnlineInvite[];
   activity: Record<string, number>;
-  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string }> } | null;
+  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
   presenceTimer: ReturnType<typeof setInterval> | null;
   session: OnlineSessionShape | null;
 }
@@ -226,6 +226,8 @@ export interface OnlineSessionShape {
   engine: RemoteBlackjack | null;
   timers: Array<ReturnType<typeof setTimeout>>;
   handsTotal: number;
+  /** 最近一次收到对方会话消息的时间戳(超时自动结束的依据)。 */
+  lastIncomingAt: number;
   /** 长休截止时间戳(休眠中时面板显示休息中)。 */
   restUntil?: number;
   /** 最近一次 state 消息参数(kv,观战视图用;双方都缓存)。 */
@@ -370,7 +372,7 @@ export class CasinoWorld implements World {
       void client.snapshot(true)
         .then((snap) => {
           if (snap?.botId && snap.botId !== client.botId) throw new Error(`服务器返回的账号 (${snap.botId}) 与配置的 botId 不一致`);
-          state.friendsCache = { fetchedAt: Date.now(), list: (snap?.friendProfiles ?? []).map((p: Record<string, unknown>) => ({ id: String(p.botId ?? p.id ?? ''), nickname: p.nickname as string | undefined })) };
+          state.friendsCache = { fetchedAt: Date.now(), list: (snap?.friendProfiles ?? []).map((p: Record<string, unknown>) => ({ id: String(p.botId ?? p.id ?? ''), nickname: p.nickname as string | undefined, bot: p.accountType === 'bot' })) };
           void this.starpostPoll();
           const pollMs = Math.max(0, Math.floor(Number(cfg.starpostPollMs) || 0));
           // presence 心跳:对好友周期性 poke(不耗消息配额),双方开桌即互为在线;停桌 10 分钟后自然转灰。
@@ -378,7 +380,7 @@ export class CasinoWorld implements World {
           const presenceTick = async (): Promise<void> => {
             try {
               const view = await client.friends();
-              state.friendsCache = { fetchedAt: Date.now(), list: view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname })) };
+              state.friendsCache = { fetchedAt: Date.now(), list: view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname, bot: p.accountType === 'bot' })) };
               for (const f of state.friendsCache.list) {
                 if (f.id === client.botId) continue;
                 await client.rpc('poke', { to: f.id }).catch(() => {});
@@ -431,6 +433,11 @@ export class CasinoWorld implements World {
       }
       sp.lastError = null;
       sp.lastPollAt = nowIso(this.opts.timezone);
+      // 会话超时:对方 15 分钟无任何会话消息(且不在长休)→ 自动结束,防僵尸会话。
+      const activeSession = sp.session;
+      if (activeSession && Date.now() - activeSession.lastIncomingAt > 15 * 60 * 1000 && !(activeSession.restUntil && Date.now() < activeSession.restUntil)) {
+        await this.closeOnlineSession('对方长时间无响应,自动结束', true);
+      }
     } catch (error) {
       sp.lastError = (error as Error).message;
     }
@@ -596,6 +603,7 @@ export class CasinoWorld implements World {
       return;
     }
     if (msg.action === 'accept') {
+      if (sp.session) return; // 已有会话进行中,忽略新接受
       const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
       if (!target) return;
       target.status = 'accepted';
@@ -608,7 +616,7 @@ export class CasinoWorld implements World {
         dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17, rng: this.opts.rng,
         deck: this.opts.starpostEngineDeck,
       });
-      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null };
+      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
       await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
       push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
@@ -624,13 +632,14 @@ export class CasinoWorld implements World {
     }
 
     // —— 会话层:start 创建客座会话;其余动作需已有会话且来自对手 ——
+    if (session && session.peer === peer) session.lastIncomingAt = Date.now();
     switch (msg.action) {
       case 'start': {
         // 我是客座:对方(庄家)开了会话,凭据里的筹码账本来自消息。
         const chips: Record<string, number> = {};
         const chipsPart = msg.kv.chips ?? '';
         for (const pair of chipsPart.split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
-        sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0, lastState: null, lastSettle: null };
+        sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
         push('casino.online_session', `[星邮联机] ${peer} 的 ${sp.session.game} 联机会话已开启(你是闲家,庄家每手轮换)。等待庄家发手,收到下注请求后用 casino_online 的 act bet X 下注。`);
         return;
       }
@@ -666,6 +675,7 @@ export class CasinoWorld implements World {
         session.handsTotal = msg.kv.hands ? Number(msg.kv.hands) : session.handsTotal;
         session.lastState = null;
         session.lastSettle = null;
+        session.lastIncomingAt = Date.now();
         session.engine = new RemoteBlackjack({
           bankChips: chips[this.myBotId()] ?? this.opts.cfg.startChips,
           playerChips: chips[session.peer] ?? this.opts.cfg.startChips,
@@ -1105,7 +1115,7 @@ export class CasinoWorld implements World {
       sp.friendsCache = { fetchedAt: now, list: sp.friendsCache?.list ?? [] };
       void sp.client.friends().then((view) => {
         if (!sp.friendsCache) sp.friendsCache = { fetchedAt: now, list: [] };
-        sp.friendsCache.list = view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname }));
+        sp.friendsCache.list = view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname, bot: p.accountType === 'bot' }));
         sp.friendsCache.fetchedAt = Date.now();
       }).catch((e) => { sp.lastError = (e as Error).message; });
     }
