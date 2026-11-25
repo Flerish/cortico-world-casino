@@ -223,6 +223,37 @@ describe('牌桌 × 星邮集成', () => {
     await world.stop();
   });
 
+  it('联机面板快照:状态/好友/在线判定与 online-invite 路由', async () => {
+    const net = new FakeStarpostNet();
+    const calls: Array<{ url: string; body: any; headers: Record<string, string> }> = [];
+    const ctx = fakeWorldContext(CASINO, { scratchDir });
+    Object.assign(ctx.cfg, { dealDelayMs: 0, starpostEnabled: true, starpostBotId: '12345', starpostToken: 't'.repeat(32), starpostPollMs: 0, starpostServer: 'https://sp.example' });
+    const post: StarpostPost = async (url, body, headers) => { calls.push({ url, body, headers: headers ?? {} }); return net.postFor('12345')(url as string, body, headers); };
+    const world = new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, botDir: ctx.botDir, rng: () => 0, starpostPost: post });
+    const worldAny = world as unknown as { handleInvoke: (p: string, m: string, a: unknown[]) => Promise<unknown> };
+    await world.start(new FakeHost());
+    await new Promise((r) => setTimeout(r, 5));
+    // 好友 67890 发来消息 → 活动追踪 → 在线判定为真。
+    net.deliver('12345', '67890', '@casino invite blackjack');
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    net.deliver('12345', '67890', '随便聊聊');
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    const snap = await worldAny.handleInvoke('table', 'online', []);
+    expect(snap.enabled).toBe(true);
+    expect(snap.status).toBe('idle');
+    const friends = snap.friends as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
+    expect(friends.length).toBe(0); // friends 缓存来自 snapshot 的 profiles;测试假网络未返回 profiles
+    // 面板代发邀约:走 online-invite action 路由。
+    const inv = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'blackjack' }]);
+    expect((inv as any).sent).toBe(true);
+    const sendCall = calls.filter((c) => c.body.action === 'message.send').at(-1)!;
+    expect(sendCall.body.args.text).toBe('@casino invite blackjack');
+    // 无会话时 stop 返回错误提示。
+    const stopped = await worldAny.handleInvoke('table', 'action', [{ action: 'online-stop' }]);
+    expect((stopped as any).error).toBeDefined();
+    await world.stop();
+  });
+
   it('远程 21 点引擎:自然黑杰克 1.5 倍结算', () => {
     const engine = new RemoteBlackjack({ bankChips: 1000, playerChips: 1000, minBet: 10, maxBet: 200, dealerHitsSoft17: false, deck: [{ rank: 5, suit: 2 }, { rank: 9, suit: 3 }, { rank: 10, suit: 1 }, { rank: 1, suit: 0 }] });
     engine.startHand(50);

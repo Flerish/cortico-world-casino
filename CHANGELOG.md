@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- **联机面板(阶段 C,主人设计)**:主菜单「联机模式」页落地——左侧本地 AI 状态卡(空闲/游戏中/休息中徽章、对手、手数、会话筹码、终止按钮),右侧好友列表(对局中黄点、在线绿点/离线灰点、在线优先排序、每行 + 号邀约弹窗选游戏);面板 1s 轮询联机快照(服务端好友缓存 15s + 活动追踪 10 分钟窗口推断在线,降低星邮服务器消耗);星邮无 presence 字段,在线状态按最近消息活动推断(工具说明注明);handleInvoke 新增 online method 与 online-invite/online-stop action(人可代 AI 主动邀约);47/47 测试。
 - **联机对局引擎(阶段 B,主人指示庄家轮流)**:`src/remote-blackjack.ts`——庄家端权威
   21 点引擎(bank/player 语义,自然黑杰克 1.5 倍、加倍、庄家按规则补牌);`@casino` 协议
   扩展至全对局生命周期(start/hand/state/act/settle/handoff/rest/stop/reject,按动作严格

@@ -212,6 +212,8 @@ export interface OnlineSessionShape {
   engine: RemoteBlackjack | null;
   timers: Array<ReturnType<typeof setTimeout>>;
   handsTotal: number;
+  /** 长休截止时间戳(休眠中时面板显示休息中)。 */
+  restUntil?: number;
 }
 
 export class CasinoWorld implements World {
@@ -230,6 +232,10 @@ export class CasinoWorld implements World {
     lastQuota: unknown;
   /** @casino 联机邀约记录(内存态,重启即失效)。 */
   invites: OnlineInvite[];
+  /** 好友最近活动时间戳(botId → ms):面板在线状态的依据;重启清零。 */
+  activity: Record<string, number>;
+  /** 好友列表缓存(15s 过期,避免面板 1s 刷新直打星邮服务器)。 */
+  friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string }> } | null;
   /** 联机会话:accept 互认后由邀约发起方(首任庄家)创建;权威端(引擎持有者)每手轮换,筹码账本按 botId 记。 */
   session: OnlineSessionShape | null;
 } | null = null;
@@ -337,7 +343,7 @@ export class CasinoWorld implements World {
         { serverUrl: cfg.starpostServer, botId: cfg.starpostBotId, token: cfg.starpostToken },
         { post: this.opts.starpostPost },
       );
-      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[], session: null };
+      const state = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {} as Record<string, number>, lastError: null as string | null, lastPollAt: null as string | null, lastQuota: null as unknown, invites: [] as OnlineInvite[], session: null, activity: {}, friendsCache: null };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
       void client.snapshot(true)
@@ -349,7 +355,7 @@ export class CasinoWorld implements World {
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
-      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null };
+      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null };
     }
   }
 
@@ -366,6 +372,7 @@ export class CasinoWorld implements World {
           if (msg.sender === sp.client.botId) continue; // 自己发的跳过
           const text = typeof msg.text === 'string' ? msg.text : (msg.audio ? '[语音]' : msg.forward ? '[聊天记录]' : '[图片/表情]');
           // @casino 协议消息(仅私聊参与):路由进联机会话,不当聊天投递。
+          if (conv.kind === 'private') sp.activity[msg.sender] = Date.now();
           if (conv.kind === 'private') {
             const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
             if (protocol) { await this.handleOnlineMessage(msg.sender, protocol, nowIso(this.opts.timezone)); continue; }
@@ -403,6 +410,7 @@ export class CasinoWorld implements World {
   /** 联机私信发送(会话内使用)。 */
   private async onlineSend(peer: string, line: string): Promise<void> {
     await this.starpost!.client.sendPrivate(peer, line);
+    this.starpost!.activity[peer] = Date.now();
   }
 
   /** 联机事件推送。 */
@@ -447,6 +455,7 @@ export class CasinoWorld implements World {
       const minutes = Math.round(restMs / 60000);
       void this.onlineSend(session.peer, onlineLine('rest', [`minutes=${minutes}`]));
       this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 已连续 ${session.handsTotal} 手,进入 ${minutes} 分钟休息(防止消耗过大,到点自动换庄继续)。`, at);
+      session.restUntil = Date.now() + restMs;
       session.timers.push(setTimeout(() => { if (sp.session === session) void this.bankHandoff(); }, restMs));
       return;
     }
@@ -940,6 +949,7 @@ export class CasinoWorld implements World {
         }
         case 'send': {
           const result = await sp.client.sendPrivate(target(), text(1000));
+          sp.activity[target()] = Date.now();
           return JSON.stringify({ delivered: true, quota: result?.quota ?? null });
         }
         case 'messages': {
@@ -962,6 +972,68 @@ export class CasinoWorld implements World {
       if (sp) sp.lastError = message;
       return JSON.stringify({ error: message, failed: true });
     }
+  }
+
+  /** 面板联机页快照:本地 AI 状态 + 好友列表(带在线/对局标记)。 */
+  private async onlineSnapshot(): Promise<Record<string, unknown>> {
+    const sp = this.starpost;
+    const cfg = this.opts.cfg;
+    const result: Record<string, unknown> = {
+      enabled: Boolean(cfg.starpostEnabled),
+      configured: Boolean(cfg.starpostBotId?.trim() && cfg.starpostToken?.trim()),
+      clientReady: Boolean(sp?.client),
+      botId: cfg.starpostBotId || null,
+      lastError: sp?.lastError ?? null,
+    };
+    if (!sp?.client) return result;
+    const myId = sp.client.botId;
+    result.myBotId = myId;
+    // 会话状态:idle / playing(我方为庄且手在进行或等待中) / resting(长休中)
+    const session = sp.session;
+    if (session) {
+      const resting = Boolean(session.restUntil && Date.now() < session.restUntil);
+      result.status = resting ? 'resting' : 'playing';
+      result.session = {
+        game: session.game,
+        peer: session.peer,
+        bank: session.bank,
+        iAmBank: session.bank === myId,
+        hands: session.handsTotal,
+        chipsMe: session.chips[myId] ?? null,
+        chipsPeer: session.chips[session.peer] ?? null,
+        restUntil: session.restUntil ?? null,
+      };
+    } else {
+      result.status = 'idle';
+      result.session = null;
+    }
+    // 好友列表:15s 缓存;过期时异步刷新(不阻塞本响应)。
+    const now = Date.now();
+    if (!sp.friendsCache || now - sp.friendsCache.fetchedAt > 15000) {
+      sp.friendsCache = { fetchedAt: now, list: sp.friendsCache?.list ?? [] };
+      void sp.client.friends().then((view) => {
+        if (!sp.friendsCache) sp.friendsCache = { fetchedAt: now, list: [] };
+        sp.friendsCache.list = view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname }));
+        sp.friendsCache.fetchedAt = Date.now();
+      }).catch((e) => { sp.lastError = (e as Error).message; });
+    }
+    const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+    const friends = (sp.friendsCache?.list ?? []).map((f) => {
+      const last = sp.activity[f.id] ?? 0;
+      const online = now - last < ONLINE_WINDOW_MS;
+      return {
+        id: f.id,
+        nickname: f.nickname || f.id,
+        online,
+        inGame: Boolean(session && session.peer === f.id),
+      };
+    });
+    // 排序:对局中 > 在线 > 离线;同段内按昵称。
+    const rank = (f: { online: boolean; inGame: boolean }): number => (f.inGame ? 0 : f.online ? 1 : 2);
+    friends.sort((a, b) => rank(a) - rank(b) || a.nickname.localeCompare(b.nickname, 'zh'));
+    result.friends = friends;
+    result.friendsUpdatedAt = sp.friendsCache?.fetchedAt ?? null;
+    return result;
   }
 
   /** 联机工具:invite/accept/decline/act/stop/state/list。依赖星邮客户端就绪。 */
@@ -2032,12 +2104,21 @@ export class CasinoWorld implements World {
     if (!this.state) this.state = loadTable(this.opts.dataDir) ?? newTable(this.opts.cfg.startChips);
     if (method === 'state') return this.snapshot();
     if (method === 'history') return { history: this.state.blackjack?.history ?? [], matches: this.matches };
+    if (method === 'online') return this.onlineSnapshot();
     if (method !== 'action') throw new Error(`unknown method ${method}`);
     const arg = (args[0] ?? {}) as Record<string, unknown>;
     const action = String(arg.action ?? '');
     const state = this.state;
     const mt = this.mt();
 
+    if (action === 'online-invite') {
+      const target = String(arg.target ?? '');
+      const game = String(arg.game ?? '');
+      return JSON.parse(await this.toolOnline({ action: 'invite', target, game }));
+    }
+    if (action === 'online-stop') {
+      return JSON.parse(await this.toolOnline({ action: 'stop', reason: 'owner' }));
+    }
     if (action === 'newgame') {
       const game = String(arg.game ?? '');
       if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);

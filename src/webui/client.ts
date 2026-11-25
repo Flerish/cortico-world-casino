@@ -260,6 +260,8 @@ const ui = {
   lobbyQuery: '',
   /** 空桌时主菜单停留在哪个视图;一进对局就重置回菜单(返回大厅先见模式选择)。 */
   lobbyMode: 'menu' as 'menu' | 'local' | 'online',
+  /** 联机页 1s 状态轮询句柄;离开联机页即清除,避免后台消耗。 */
+  onlineTimer: null as number | null,
 };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
@@ -391,6 +393,28 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .wip-icon { font-size: 40px; }
     .wip-title { font-size: 17px; font-weight: 800; margin: 10px 0 6px; letter-spacing: 2px; }
     .wip-desc { font-size: 13px; opacity: .8; line-height: 1.6; max-width: 380px; margin: 0 auto 14px; }
+    .online-grid { display: flex; gap: 10px; align-items: stretch; }
+    .online-status { flex: none; width: 42%; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+    .online-friends { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+    .online-status-title, .online-friends-title { font-size: 12px; font-weight: 700; opacity: .75; letter-spacing: 1px; }
+    .online-badge { font-size: 15px; font-weight: 800; padding: 2px 10px; border-radius: 10px; }
+    .online-badge-idle { background: rgba(127,127,127,.18); }
+    .online-badge-play { background: rgba(212,175,55,.25); color: #b8860b; }
+    .online-badge-rest { background: rgba(70,130,180,.22); color: #4682b4; }
+    .online-status-line { font-size: 12px; opacity: .85; line-height: 1.5; word-break: break-all; }
+    .online-stop { margin-top: 4px; padding: 4px 12px; font-size: 12px; background: rgba(178,34,34,.14); border: 1px solid rgba(178,34,34,.4); border-radius: 8px; cursor: pointer; }
+    .friend-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,.5); }
+    .friend-offline { opacity: .45; }
+    .friend-ingame { background: rgba(212,175,55,.16); }
+    .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; }
+    .dot-online { background: #2e8b57; box-shadow: 0 0 0 2px rgba(46,139,87,.18); }
+    .dot-offline { background: #9a9a9a; }
+    .dot-ingame { background: #e6b422; box-shadow: 0 0 0 2px rgba(230,180,34,.25); }
+    .friend-name { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .friend-id { font-size: 11px; opacity: .6; flex: 1; text-align: right; }
+    .friend-invite { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(0,0,0,.25); background: rgba(255,255,255,.6); font-size: 15px; line-height: 1; cursor: pointer; font-weight: 700; }
+    .friend-invite:hover { background: rgba(212,175,55,.3); }
+    .online-game-row { flex-wrap: wrap; }
     .lobby-suits { font-size: 15px; letter-spacing: 10px; text-indent: 10px; }
     .lobby-suits .ls-black { color: #eae4d2; }
     .lobby-suits .ls-red { color: #f0a3a3; }
@@ -508,6 +532,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
 
   // ── 空桌:主菜单(本地模式 / 联机模式) → 本地模式里是游戏大厅 ──
   if (state.game !== null) ui.lobbyMode = 'menu';
+  if (ui.lobbyMode !== 'online' && ui.onlineTimer !== null) { clearInterval(ui.onlineTimer); ui.onlineTimer = null; }
   if (state.game === null) {
     const felt = el('div', 'felt lobby');
     wrap.append(felt);
@@ -546,25 +571,124 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       }
       felt.append(grid);
     } else if (ui.lobbyMode === 'online') {
-      // 联机模式占位:后续多人对局的入口。
+      // 联机模式:左侧本地 AI 状态,右侧好友列表(在线亮/离线暗/对局黄点),+号邀约,1s 轮询。
       const head = el('div', 'lobby-head');
       head.append(el('div', 'lobby-title', T.modeMenu.onlineTitle), el('div', 'lobby-sub', T.modeMenu.onlineTag));
       felt.append(head);
-      const wip = el('div', 'wip');
-      wip.append(el('div', 'wip-icon', '🚧'));
-      wip.append(el('div', 'wip-title', T.modeMenu.onlineWip));
-      wip.append(el('div', 'wip-desc', T.modeMenu.onlineWipDesc));
-      const row = el('div', 'btnrow');
-      row.style.justifyContent = 'center';
-      const back = el('button', 'primary', T.modeMenu.backBtn);
+
+      // 返回主菜单(模式选择)。
+      const backRow = el('div', 'lobby-backrow');
+      const back = el('button', 'rules-btn', T.modeMenu.backToMenu);
       back.type = 'button';
       back.addEventListener('click', () => {
         ui.lobbyMode = 'menu';
         if (current) render(ctx, current);
       }, { signal: ctx.signal });
-      row.append(back);
-      wip.append(row);
-      felt.append(wip);
+      backRow.append(back);
+      felt.append(backRow);
+
+      // 两栏:左 = 本地 AI 状态;右 = 好友列表。
+      const grid = el('div', 'online-grid');
+      const statusCard = el('div', 'online-status');
+      const friendsCard = el('div', 'online-friends');
+      friendsCard.append(el('div', 'online-friends-title', T.online.friendsTitle));
+      grid.append(statusCard, friendsCard);
+      felt.append(grid);
+      const onlineError = el('div', 'casino-error');
+      onlineError.style.display = 'none';
+      felt.append(onlineError);
+
+      /** 拉取联机快照并就地更新两栏(不整页重渲染,避免打断弹窗)。 */
+      const refresh = async (): Promise<void> => {
+        let data: Record<string, any>;
+        try {
+          data = await ctx.invoke<Record<string, any>>('online', []);
+        } catch (err) {
+          onlineError.textContent = err instanceof Error ? err.message : String(err);
+          onlineError.style.display = 'block';
+          return;
+        }
+        onlineError.style.display = 'none';
+        // 左:本地 AI 状态。
+        statusCard.replaceChildren();
+        const statusLabel = data.status === 'resting' ? T.online.statusResting
+          : data.status === 'playing' ? T.online.statusPlaying : T.online.statusIdle;
+        const statusCls = data.status === 'resting' ? 'online-badge-rest' : data.status === 'playing' ? 'online-badge-play' : 'online-badge-idle';
+        statusCard.append(el('div', 'online-status-title', T.online.statusTitle));
+        statusCard.append(el('span', `online-badge ${statusCls}`, statusLabel));
+        statusCard.append(el('div', 'online-status-line', `${T.online.selfId} ${data.myBotId ?? data.botId ?? T.online.unknown}`));
+        if (data.status !== 'idle' && data.session) {
+          const sess = data.session;
+          const gameName = sess.game === 'blackjack' ? T.online.gameBlackjack : sess.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem;
+          statusCard.append(el('div', 'online-status-line', `${T.online.vsLabel} ${sess.peer} · ${gameName}`));
+          statusCard.append(el('div', 'online-status-line', `${T.online.handsLabel} ${sess.hands} · ${T.online.chipsMe} ${sess.chipsMe ?? '?'} · ${T.online.chipsPeer} ${sess.chipsPeer ?? '?'}`));
+          statusCard.append(el('div', 'online-status-line', sess.iAmBank ? T.online.youAreBank : T.online.peerIsBank));
+          if (data.status === 'resting') statusCard.append(el('div', 'online-status-line', T.online.restHint));
+          const stop = el('button', 'online-stop', T.online.stopBtn);
+          stop.type = 'button';
+          stop.addEventListener('click', () => {
+            void send(ctx, T, 'online-stop');
+          }, { signal: ctx.signal });
+          statusCard.append(stop);
+        } else if (data.enabled === false) {
+          statusCard.append(el('div', 'online-status-line', T.online.notEnabled));
+        } else if (data.configured === false) {
+          statusCard.append(el('div', 'online-status-line', T.online.notConfigured));
+        } else if (data.clientReady === false) {
+          statusCard.append(el('div', 'online-status-line', `${T.online.clientNotReady} ${data.lastError ?? ''}`));
+        } else if (data.lastError) {
+          statusCard.append(el('div', 'online-status-line', `${T.online.lastErr} ${data.lastError}`));
+        } else {
+          statusCard.append(el('div', 'online-status-line', T.online.idleHint));
+        }
+        // 右:好友列表(对局中黄点、在线绿点、离线灰点;列表已按在线优先排序)。
+        friendsCard.querySelectorAll('.friend-row').forEach((n) => n.remove());
+        const friends = (data.friends ?? []) as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;
+        if (!friends.length) {
+          friendsCard.append(el('div', 'lobby-empty', T.online.noFriends));
+        }
+        for (const f of friends) {
+          const row = el('div', `friend-row ${f.inGame ? 'friend-ingame' : f.online ? 'friend-online' : 'friend-offline'}`);
+          const dot = el('span', `dot ${f.inGame ? 'dot-ingame' : f.online ? 'dot-online' : 'dot-offline'}`);
+          row.append(dot);
+          row.append(el('span', 'friend-name', f.nickname));
+          row.append(el('span', 'friend-id', f.id));
+          const plus = el('button', 'friend-invite', '+');
+          plus.type = 'button';
+          plus.title = T.online.inviteBtnTitle;
+          plus.addEventListener('click', () => {
+            // 弹窗:选择邀请游玩的种类。
+            const overlay = el('div', 'rules-overlay');
+            const card = el('div', 'rules-card');
+            card.append(el('h4', undefined, `${T.online.inviteTitle} · ${f.nickname}`));
+            const gRow = el('div', 'btnrow online-game-row');
+            for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem]] as const) {
+              const gb = el('button', 'primary', label);
+              gb.type = 'button';
+              gb.addEventListener('click', () => {
+                overlay.remove();
+                void send(ctx, T, 'online-invite', { target: f.id, game: g });
+              }, { signal: ctx.signal });
+              gRow.append(gb);
+            }
+            const cRow = el('div', 'btnrow');
+            const cancel = el('button', undefined, T.gamePicker.resumeCancel);
+            cancel.type = 'button';
+            cancel.addEventListener('click', () => overlay.remove(), { signal: ctx.signal });
+            cRow.append(cancel);
+            card.append(gRow, cRow);
+            overlay.append(card);
+            wrap.append(overlay);
+            bindEsc(() => overlay.remove());
+          }, { signal: ctx.signal });
+          row.append(plus);
+          friendsCard.append(row);
+        }
+      };
+      void refresh();
+      // 每秒刷新一次状态(轻拉缓存快照,减少后台消耗);离开联机页时清除。
+      if (ui.onlineTimer !== null) clearInterval(ui.onlineTimer);
+      ui.onlineTimer = window.setInterval(() => void refresh(), 1000);
     } else {
       // ── 本地模式:游戏大厅(可滚动列表 + 搜索;以后新玩法往列表里加卡即可) ──
       const head = el('div', 'lobby-head');
