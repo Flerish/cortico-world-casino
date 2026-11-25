@@ -49,7 +49,7 @@ export function parseOnlineMessage(text: string): OnlineMessage | null {
     if (bare[0] === 'bet' && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
     if (bare[0] !== 'bet' && bare.length !== 1) return null;
   } else if (action === 'hand') {
-    if (bare.length || Object.keys(kv).length) return null; // hand 无参数
+    if (bare.length) return null; // hand 无裸参数,kv 允许(抽鬼牌开局带闲家手牌)
   } else if (action === 'state') {
     if (bare.length || !Object.keys(kv).length) return null; // state 只收 key=value 参数
   } else {

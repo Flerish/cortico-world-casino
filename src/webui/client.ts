@@ -323,6 +323,8 @@ const ui = {
 };
 /** 最近一次渲染的快照,规则浮层开合时用它重渲染。 */
 let current: Snapshot | null = null;
+/** 最近一次非观战的真实快照(观战退出时回到联机页用它重渲染)。 */
+let lastRealSnapshot: Snapshot | null = null;
 
 function bjResultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
   const last = state.lastResult;
@@ -345,6 +347,7 @@ function bjResultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
 
 function render(ctx: WebUiPanelContext, state: Snapshot): void {
   current = state;
+  if (!state.spectate) lastRealSnapshot = state;
   if (state.game !== 'blackjack' && state.game !== 'holdem') ui.bet = 0;
   const T = panelText(ctx.language);
   const root = ctx.root;
@@ -724,7 +727,13 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           statusCard.append(el('div', 'online-status-line', T.online.idleHint));
         }
         // 右栏:观战模式显示牌局实况;否则好友列表(黄/绿/灰点,在线优先)。
-        if (ui.spectate && data.status !== 'idle') {
+        if (ui.spectate) {
+          if (data.status === 'idle') {
+            // AI 退出对局/会话结束:自动离开观战,回到联机大厅(主人要求)。
+            ui.spectate = false;
+            render(ctx, lastRealSnapshot ?? (current as Snapshot));
+            return;
+          }
           let spec: Record<string, any>;
           try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = { state: 'idle' }; }
           if (spec?.snapshot) {

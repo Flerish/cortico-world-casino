@@ -388,7 +388,8 @@ export class CasinoWorld implements World {
                 await client.rpc('poke', { to: f.id }).catch(() => {});
               }
               state.lastError = null;
-            } catch { /* 心跳失败不打扰主流程,下一轮重试。 */ }
+              console.log(`[casino] presence 心跳:${state.friendsCache?.list.filter((f) => f.bot).length ?? 0} 个 bot 好友已戳`);
+            } catch (e) { console.log(`[casino] presence 心跳失败(下一轮重试):${(e as Error).message}`); }
           };
           state.presenceTimer = setInterval(() => { void presenceTick(); }, 8 * 60 * 1000);
           setTimeout(() => { void presenceTick(); }, 30 * 1000); // 首轮 30s 后开始
@@ -527,9 +528,28 @@ export class CasinoWorld implements World {
   private async bankDealHand(): Promise<void> {
     const sp = this.starpost!;
     const session = sp.session!;
+    const at = nowIso(this.opts.timezone);
     if (!session.engine) return;
+    if (session.game === 'oldmaid') {
+      // 抽鬼牌:无下注,开局即发牌;先后手按引擎轮换(奇数手庄家先抽)。
+      const om = session.engine as RemoteOldMaid;
+      om.startHand();
+      if (om.state && om.state.turn === 'bank' && !om.state.done) om.bankDraws(); // 庄家先手自动抽
+      if (om.phase === 'done') { await this.bankFinishHand(session, om, at); return; }
+      session.lastState = this.kvFromParts(om.stateParts());
+      await this.onlineSend(session.peer, onlineLine('hand', om.stateParts()));
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一局抽鬼牌开始(共 ${session.handsTotal + 1} 局)。庄家 ${om.handDetail()}`, at);
+      return;
+    }
+    if (session.game === 'holdem') {
+      // 德州:无"请下注"消息——startHand 发底牌+盲注,行动权在谁由 afterHoldemAction 统一推进。
+      const hd = session.engine as RemoteHoldem;
+      hd.startHand();
+      await this.afterHoldemAction(session, hd, at);
+      return;
+    }
     await this.onlineSend(session.peer, onlineLine('hand')).catch((e) => { sp.lastError = (e as Error).message; });
-    this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一手开始,已请 ${session.peer} 下注(会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]})。`, nowIso(this.opts.timezone));
+    this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一手开始,已请 ${session.peer} 下注(会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]})。`, at);
   }
 
   /** 庄家:节奏调度——按 gapMs 间隔安排下一手;连满 restAfterHands 手先长休。庄家每手轮换。 */
