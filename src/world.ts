@@ -680,7 +680,7 @@ export class CasinoWorld implements World {
       const game = msg.game ?? 'blackjack';
       const pending = sp.invites.some((i) => i.direction === 'in' && i.peer === peer && i.game === game && i.status === 'pending');
       this.trackInvite({ direction: 'in', peer, game, at, status: 'pending' });
-      if (!pending) push('casino.online_invite', `[星邮联机] ${peer} 邀请你玩一局 ${game}。用 casino_online 的 accept/decline 回应;接受后由对方(庄家)开局。`);
+      if (!pending) push('casino.online_invite', `[星邮联机] ${peer} 邀请你玩一局 ${game}。用 casino_online 回应:action=accept, target='${peer}' 接受,或 action=decline, target='${peer}' 婉拒;接受后由对方(庄家)开局。`);
       return;
     }
     if (msg.action === 'accept') {
@@ -1376,7 +1376,14 @@ export class CasinoWorld implements World {
         }
         case 'accept': {
           if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game}),先 stop 再回应。` });
-          const target = targetOf();
+          // target 缺省时自动采用最近的待回应邀约(邀约事件已提示带 target,但 AI 忘带时不该死锁)。
+          const rawTarget = String(args.target ?? '').trim();
+          let target = /^d{5,12}$/.test(rawTarget) ? rawTarget : '';
+          if (!target) {
+            const pend = sp.invites.filter((i) => i.direction === 'in' && i.status === 'pending').at(-1);
+            if (!pend) return JSON.stringify({ error: '没有待回应的邀约。' });
+            target = pend.peer;
+          }
           const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
           if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
           await sp.client.sendPrivate(target, composeOnlineMessage('accept', pending.game));
