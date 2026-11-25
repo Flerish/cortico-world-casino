@@ -7,6 +7,7 @@
  * 面板文字按浏览器语言,见 webui/strings.ts。
  */
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import type { ToolCallContext, ToolDef, World, WorldHost, WorldStreamSocket, WorldWebUiDecl } from 'cortico/core/types.ts';
 import type { Language } from 'cortico/core/language.ts';
 import { nowIso } from 'cortico/core/util.ts';
@@ -326,6 +327,7 @@ export class CasinoWorld implements World {
   }
 
   async start(host: WorldHost): Promise<void> {
+    try { const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }; console.log(`[casino] 月下牌桌已挂载,代码版本 v${pkg.version ?? '?'}`); } catch { /* 版本日志失败不影响挂载 */ }
     this.host = host;
     this.state = loadTable(this.opts.dataDir);
     if (!this.state) {
