@@ -1331,7 +1331,27 @@ export class CasinoWorld implements World {
 
     if (session.game === 'oldmaid') {
       const om = engine as RemoteOldMaid;
-      if (!om?.state) return { state: 'active', snapshot: { ...base, game: 'oldmaid', phase: 'idle', spectate: true } };
+      if (!om?.state) {
+        // 客座端:无权威引擎,用缓存的 state kv 构建视角(自己的牌面可见,对方只有张数)。
+        const kv = session.lastState ?? {};
+        const own = kv.cards && kv.cards !== 'none' ? kv.cards.split(',') : [];
+        const aiRole = iAmBank ? 'ai' : 'player';
+        return { state: 'active', snapshot: {
+          ...base,
+          game: 'oldmaid',
+          turnOwner: kv.turn === 'you' ? (iAmBank ? 'player' : 'ai') : (iAmBank ? 'ai' : 'player'),
+          winner: null,
+          playerCards: aiRole === 'player' ? own : [],
+          playerHandCount: aiRole === 'player' ? own.length : Number(kv.oppCount ?? 0),
+          aiHandCount: aiRole === 'ai' ? own.length : Number(kv.oppCount ?? 0),
+          discardPairs: Number(kv.pairs ?? 0),
+          lastDiscards: [],
+          score: { ai: 0, player: 0 },
+          hiddenCard: null,
+          oldmaidPlays: session.handsTotal,
+          oldmaidHistory: [],
+        } };
+      }
       const st = om.state;
       const idlerLocal: 'ai' | 'player' = iAmBank ? 'player' : 'ai';
       const myHand = iAmBank ? st.bankHand : st.playerHand;
@@ -1355,7 +1375,39 @@ export class CasinoWorld implements World {
     }
 
     const hd = engine as RemoteHoldem;
-    if (!hd?.state) return { state: 'active', snapshot: { ...base, game: 'holdem', phase: 'idle', spectate: true } };
+    if (!hd?.state) {
+      // 客座端:无权威引擎,用缓存的 state kv 构建完整视角(自己的底牌可见,对方的只见张数)。
+      const kv = session.lastState ?? {};
+      const holeCards = kv.hole && kv.hole !== 'none' ? kv.hole.split(',') : [];
+      return { state: 'active', snapshot: {
+        ...base,
+        game: 'holdem',
+        phase: kv.street === 'showdown' ? 'runout' : (kv.street ?? 'idle'),
+        round: session.handsTotal + 1,
+        button: (kv.button === 'bank') === iAmBank ? 'ai' : 'player',
+        toAct: kv.turn === 'you' ? 'ai' : 'player',
+        winner: null,
+        revealHole: false,
+        byFold: false,
+        blinds: { sb: Math.max(1, Math.floor(this.opts.cfg.holdemBlind / 2)), bb: this.opts.cfg.holdemBlind },
+        streetCap: this.opts.cfg.maxBet,
+        currentBet: Number(kv.currentBet ?? 0),
+        minRaise: Number(kv.minRaise ?? 0),
+        pot: Number(kv.pot ?? 0),
+        community: kv.board && kv.board !== 'none' ? kv.board.split(',') : [],
+        playerCards: [],
+        aiCards: holeCards,
+        aiHoleCount: holeCards.length,
+        aiCommitted: Number(kv.myCommitted ?? 0),
+        playerCommitted: Number(kv.oppCommitted ?? 0),
+        aiFolded: kv.myFolded === 'true',
+        playerFolded: kv.oppFolded === 'true',
+        aiAllIn: kv.myAllIn === 'true',
+        playerAllIn: kv.oppAllIn === 'true',
+        lastHoldem: null,
+        holdemHistory: [],
+      } };
+    }
     const st = hd.state;
     const myCards = iAmBank ? st.hole.bank : st.hole.player;
     const peerCards = iAmBank ? st.hole.player : st.hole.bank;
