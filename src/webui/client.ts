@@ -693,6 +693,46 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
       felt.append(onlineError);
 
       /** 拉取联机快照并就地更新两栏(不整页重渲染,避免打断弹窗)。 */
+      let lastOnlineData: Record<string, any> | null = null;
+      /** 邀约弹窗(事件委托复用;好友行与 + 按钮每秒重建,监听挂持久容器才不会偶发失效)。 */
+      const openInviteOverlay = (nick: string, id: string): void => {
+        const overlay = el('div', 'rules-overlay');
+        const card = el('div', 'rules-card');
+        card.append(el('h4', undefined, `${T.online.inviteTitle} · ${nick}`));
+        const gRow = el('div', 'btnrow online-game-row');
+        for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem]] as const) {
+          const gb = el('button', 'primary', label);
+          gb.type = 'button';
+          gb.addEventListener('click', async () => {
+            overlay.remove();
+            try { await ctx.invoke('action', [{ action: 'online-invite', target: id, game: g }]); } catch (err) { showError(ctx, err instanceof Error ? err.message : String(err)); }
+            void refresh();
+          });
+          gRow.append(gb);
+        }
+        const cRow = el('div', 'btnrow');
+        const cancel = el('button', undefined, T.gamePicker.resumeCancel);
+        cancel.type = 'button';
+        cancel.addEventListener('click', () => overlay.remove());
+        cRow.append(cancel);
+        card.append(gRow, cRow);
+        overlay.append(card);
+        wrap.append(overlay);
+        bindEsc(() => overlay.remove());
+      };
+      statusCard.addEventListener('click', (e) => {
+        // 状态卡内容每秒重建,但卡片元素持久:委托监听一次挂载,点击不再偶发失效。
+        const hit = (e.target as Element | null)?.closest('.online-status-title');
+        if (!hit || !lastOnlineData || lastOnlineData.status === 'idle') return; // 空闲时无局可观
+        ui.spectate = !ui.spectate;
+        lastSpectateJson = '';
+        void refresh();
+      });
+      friendsCard.addEventListener('click', (e) => {
+        const plus = (e.target as Element | null)?.closest('.friend-invite') as HTMLElement | null;
+        if (!plus) return;
+        openInviteOverlay(plus.dataset.nick ?? '', plus.dataset.id ?? '');
+      });
       const refresh = async (): Promise<void> => {
         let data: Record<string, any>;
         try {
@@ -703,15 +743,14 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           return;
         }
         onlineError.style.display = 'none';
+        lastOnlineData = data;
+        onlineError.style.display = 'none';
         // 左:本地 AI 状态。
         statusCard.replaceChildren();
         const statusLabel = data.status === 'resting' ? T.online.statusResting
           : data.status === 'playing' ? T.online.statusPlaying : T.online.statusIdle;
         const statusCls = data.status === 'resting' ? 'online-badge-rest' : data.status === 'playing' ? 'online-badge-play' : 'online-badge-idle';
         const statusTitle = el('div', 'online-status-title' + (data.status !== 'idle' ? ' online-status-clickable' : ''), T.online.statusTitle);
-        if (data.status !== 'idle') {
-          statusTitle.addEventListener('click', () => { ui.spectate = !ui.spectate; void refresh(); }, { signal: ctx.signal });
-        }
         statusCard.append(statusTitle);
         statusCard.append(el('span', `online-badge ${statusCls}`, statusLabel));
         statusCard.append(el('div', 'online-status-line', `${T.online.selfId} ${data.myBotId ?? data.botId ?? T.online.unknown}`));
@@ -777,32 +816,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           plus.type = 'button';
           plus.title = f.online ? T.online.inviteBtnTitle : T.online.inviteOfflineTitle;
           if (!f.online) plus.disabled = true; // 只有在线好友可邀约(离线置灰)
-          plus.addEventListener('click', () => {
-            // 弹窗:选择邀请游玩的种类。
-            const overlay = el('div', 'rules-overlay');
-            const card = el('div', 'rules-card');
-            card.append(el('h4', undefined, `${T.online.inviteTitle} · ${f.nickname}`));
-            const gRow = el('div', 'btnrow online-game-row');
-            for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem]] as const) {
-              const gb = el('button', 'primary', label);
-              gb.type = 'button';
-              gb.addEventListener('click', async () => {
-                overlay.remove();
-                try { await ctx.invoke('action', [{ action: 'online-invite', target: f.id, game: g }]); } catch (err) { showError(ctx, err instanceof Error ? err.message : String(err)); }
-                void refresh();
-              }, { signal: ctx.signal });
-              gRow.append(gb);
-            }
-            const cRow = el('div', 'btnrow');
-            const cancel = el('button', undefined, T.gamePicker.resumeCancel);
-            cancel.type = 'button';
-            cancel.addEventListener('click', () => overlay.remove(), { signal: ctx.signal });
-            cRow.append(cancel);
-            card.append(gRow, cRow);
-            overlay.append(card);
-            wrap.append(overlay);
-            bindEsc(() => overlay.remove());
-          }, { signal: ctx.signal });
+          plus.dataset.nick = f.nickname;
+          plus.dataset.id = f.id;
           row.append(plus);
           friendsCard.append(row);
         }
