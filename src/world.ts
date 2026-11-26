@@ -218,6 +218,8 @@ interface StarpostState {
   activity: Record<string, number>;
   friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
   presenceTimer: ReturnType<typeof setInterval> | null;
+  /** 自适应轮询链的代际号(重装配自增,旧链自动退场)。 */
+  pollChain?: number;
   session: OnlineSessionShape | null;
 }
 
