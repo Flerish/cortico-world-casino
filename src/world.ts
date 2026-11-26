@@ -261,6 +261,8 @@ export class CasinoWorld implements World {
   friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
   /** presence 心跳定时器:对好友周期性 poke(不耗消息配额),维持在线判定。 */
   presenceTimer: ReturnType<typeof setInterval> | null;
+  /** 自适应轮询链的代际号:重装配时自增,旧链看到代际不符自动退场(防双链互踩)。 */
+  pollChain?: number;
   /** 联机会话:accept 互认后由邀约发起方(首任庄家)创建;权威端(引擎持有者)每手轮换,筹码账本按 botId 记。 */
   session: OnlineSessionShape | null;
 } | null = null;
@@ -393,17 +395,21 @@ export class CasinoWorld implements World {
               console.log(`[casino] presence 心跳:${state.friendsCache?.list.filter((f) => f.bot).length ?? 0} 个 bot 好友已戳`);
             } catch (e) { console.log(`[casino] presence 心跳失败(下一轮重试):${(e as Error).message}`); }
           };
+          if (state.presenceTimer) clearInterval(state.presenceTimer); // 重装配先清旧心跳,防止翻倍
           state.presenceTimer = setInterval(() => { void presenceTick(); }, 8 * 60 * 1000);
           setTimeout(() => { void presenceTick(); }, 30 * 1000); // 首轮 30s 后开始
           // 自适应轮询:有联机会话或待回应邀约时 5s 快轮(协议消息每跳最多等 5s),空闲回落到配置间隔。
           if (pollMs > 0) {
+            state.pollChain = (state.pollChain ?? 0) + 1;
+            const chain = state.pollChain;
             const scheduleNext = (): void => {
-              if (state.timer) clearTimeout(state.timer);
-              const active = Boolean(state.session) || state.invites.some((i) => i.status === 'pending');
-              const ms = active ? Math.min(5000, pollMs) : pollMs;
-              state.timer = setTimeout(() => { void this.starpostPoll().then(scheduleNext).catch(scheduleNext); }, ms);
-            };
-            scheduleNext();
+               if (state.pollChain !== chain) return; // 新装配已接管,旧链退场(防双轮询链互踩)
+               if (state.timer) clearTimeout(state.timer);
+               const active = Boolean(state.session) || state.invites.some((i) => i.status === 'pending');
+               const ms = active ? Math.min(5000, pollMs) : pollMs;
+               state.timer = setTimeout(() => { void this.starpostPoll().then(scheduleNext).catch(scheduleNext); }, ms);
+             };
+             scheduleNext();
           }
         })
         .catch((error) => { state.lastError = (error as Error).message; });
