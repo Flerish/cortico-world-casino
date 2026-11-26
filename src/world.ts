@@ -434,7 +434,11 @@ export class CasinoWorld implements World {
           if (msg.sender === sp.client.botId) continue; // 自己发的跳过
           const text = typeof msg.text === 'string' ? msg.text : (msg.audio ? '[语音]' : msg.forward ? '[聊天记录]' : '[图片/表情]');
           // @casino 协议消息(仅私聊参与):路由进联机会话,不当聊天投递。
-          if (conv.kind === 'private') sp.activity[msg.sender] = Date.now();
+          // 活动戳只认新鲜消息(10 分钟内):重启游标重置会重放历史消息,旧消息不得把
+          // 早已下线的好友"复活"成在线(在线窗口同为 10 分钟,口径一致)。
+          const msgAtMs = msg.at ? Date.parse(String(msg.at)) : NaN;
+          const msgFresh = !Number.isFinite(msgAtMs) || Date.now() - msgAtMs < 10 * 60 * 1000;
+          if (conv.kind === 'private' && msgFresh) sp.activity[msg.sender] = Date.now();
           if ((msg as Record<string, unknown>).interaction === 'poke') continue; // 戳一戳:只作 presence 信号,不推给 AI
           if (conv.kind === 'private') {
             const protocol = parseOnlineMessage(typeof msg.text === 'string' ? msg.text : '');
