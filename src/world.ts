@@ -785,6 +785,7 @@ export class CasinoWorld implements World {
         const chipsPart = msg.kv.chips ?? '';
         for (const pair of chipsPart.split(',')) { const [id, n] = pair.split(':'); if (id && n) chips[id] = Number(n); }
         sp.session = { game: msg.game ?? 'blackjack', peer, chips, bank: peer, engine: null, timers: [], handsTotal: msg.kv.hands ? Number(msg.kv.hands) : 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
+        sp.invites.length = 0; // 开局清邀约(主人规则:双方进入牌局后,两边的邀约记录全部作废)
         console.log(`[casino] 会话建立:我=闲家(${this.myBotId()}) 庄家=${peer} 游戏=${sp.session.game}`);
         push('casino.online_session', `[星邮联机] ${peer} 的 ${sp.session.game} 联机会话已开启(你是闲家,庄家每手轮换)。等待庄家发手,收到下注请求后用 casino_online 的 act bet X 下注。`);
         return;
