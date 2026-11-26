@@ -325,6 +325,10 @@ const ui = {
 let current: Snapshot | null = null;
 /** 最近一次非观战的真实快照(观战退出时回到联机页用它重渲染)。 */
 let lastRealSnapshot: Snapshot | null = null;
+/** 观战横幅持久元素(1s 重渲染后重新贴回,退出按钮常驻可点)。 */
+let spectateBarEl: HTMLElement | null = null;
+/** 上一次观战快照的 JSON(无变化时跳过整页重渲染,防闪烁/防按钮被频繁重建)。 */
+let lastSpectateJson = '';
 
 function bjResultBanner(T: PanelText, state: Snapshot): HTMLElement | null {
   const last = state.lastResult;
@@ -602,13 +606,23 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   wrap.append(topbar);
 
   if (state.spectate && state.game) {
-    const bar = el('div', 'spectate-bar');
-    bar.append(el('span', 'spectate-title', T.online.spectateTitle + ' · ' + (state.game === 'blackjack' ? T.online.gameBlackjack : state.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem)));
-    const exit = el('button', 'online-stop', T.online.spectateExit);
-    exit.type = 'button';
-    exit.addEventListener('click', () => { ui.spectate = false; }, { signal: ctx.signal });
-    bar.append(exit);
-    wrap.prepend(bar);
+    // 观战横幅是持久元素:每次 1s 重渲染后重新贴回同一节点(退出按钮常驻可点,不随牌桌重建)。
+    if (!spectateBarEl) {
+      const bar = el('div', 'spectate-bar');
+      bar.append(el('span', 'spectate-title', T.online.spectateTitle + ' · ' + (state.game === 'blackjack' ? T.online.gameBlackjack : state.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem)));
+      const exit = el('button', 'online-stop', T.online.spectateExit);
+      exit.type = 'button';
+      exit.addEventListener('click', () => {
+        ui.spectate = false;
+        lastSpectateJson = '';
+        spectateBarEl?.remove();
+        spectateBarEl = null;
+        render(ctx, lastRealSnapshot ?? (current as Snapshot));
+      });
+      bar.append(exit);
+      spectateBarEl = bar;
+    }
+    wrap.prepend(spectateBarEl);
   }
   // ── 空桌:主菜单(本地模式 / 联机模式) → 本地模式里是游戏大厅 ──
   if (state.game !== null && !state.spectate) ui.lobbyMode = 'menu';
@@ -731,16 +745,22 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           if (data.status === 'idle') {
             // AI 退出对局/会话结束:自动离开观战,回到联机大厅(主人要求)。
             ui.spectate = false;
+            lastSpectateJson = '';
+            spectateBarEl?.remove();
+            spectateBarEl = null;
             render(ctx, lastRealSnapshot ?? (current as Snapshot));
             return;
           }
           let spec: Record<string, any>;
-          try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = { state: 'idle' }; }
-          if (spec?.snapshot) {
-            // 导入单机牌桌渲染器:远程同构快照整页渲染,1s 轮询持续刷新牌面。
-            render(ctx, spec.snapshot as Snapshot);
-            return;
-          }
+          try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = null; }
+          if (!spec?.snapshot) return; // 拉取失败:保持当前牌桌,下一秒重试(避免与大厅渲染交替闪烁)
+          const snapJson = JSON.stringify(spec.snapshot);
+          if (snapJson === lastSpectateJson) return; // 快照无变化:不重渲染(退出按钮稳定可点)
+          lastSpectateJson = snapJson;
+          // 导入单机牌桌渲染器:远程同构快照整页渲染,1s 轮询持续刷新牌面。
+          render(ctx, spec.snapshot as Snapshot);
+          if (spectateBarEl) ctx.root.prepend(spectateBarEl); // 稳定横幅重新贴回
+          return;
         }
         friendsCard.querySelectorAll('.friend-row').forEach((n) => n.remove());
         const friends = (data.friends ?? []) as Array<{ id: string; nickname: string; online: boolean; inGame: boolean }>;

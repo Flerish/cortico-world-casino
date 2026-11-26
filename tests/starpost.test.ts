@@ -247,10 +247,16 @@ describe('牌桌 × 星邮集成', () => {
     expect(friends.length).toBe(0); // friends 缓存来自 snapshot 的 profiles;测试假网络未返回 profiles
     // 邀约守卫(主人指示):有待回应邀约时,向同一对方发起邀约被拒。
     const blocked = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'blackjack' }]);
-    expect((blocked as any).error).toContain('待回应');
-    // 先婉拒对方的邀约 → 再邀约成功。
-    const dec = await (world as unknown as { toolOnline: (a: Record<string, unknown>) => Promise<string> }).toolOnline({ action: 'decline', target: '67890' });
-    expect(JSON.parse(dec).declined).toBe(true);
+    // 同游戏撞车 → 自动改为接受对方邀约(不再有死端)。
+    expect((blocked as any).autoAccepted).toBe(true);
+    // 不同游戏撞车 → 守卫拦截,提示先回应。
+    net.deliver('12345', '67890', '@casino invite oldmaid');
+    await (world as unknown as { starpostPoll: () => Promise<void> }).starpostPoll();
+    const blocked2 = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'holdem' }]);
+    expect((blocked2 as any).error).toContain('待回应');
+    // 婉拒对方的 oldmaid 邀约 → 再邀约 blackjack 成功。
+    const dec = JSON.parse(await (world as unknown as { toolOnline: (a: Record<string, unknown>) => Promise<string> }).toolOnline({ action: 'decline', target: '67890' }));
+    expect(dec.declined).toBe(true);
     const inv = await worldAny.handleInvoke('table', 'action', [{ action: 'online-invite', target: '67890', game: 'blackjack' }]);
     expect((inv as any).sent).toBe(true);
     const sendCall = calls.filter((c) => c.body.action === 'message.send').at(-1)!;

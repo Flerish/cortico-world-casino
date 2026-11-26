@@ -501,7 +501,13 @@ export class CasinoWorld implements World {
 
   /** 联机私信发送(会话内使用)。 */
   private async onlineSend(peer: string, line: string): Promise<void> {
-    await this.starpost!.client.sendPrivate(peer, line);
+    // 星邮链路偶发抖动(实测出现过 fetch failed):失败后 2 秒重试一次,大幅降低"单侧会话建立"概率。
+    try {
+      await this.starpost!.client.sendPrivate(peer, line);
+    } catch (error) {
+      await new Promise((r) => setTimeout(r, 2000));
+      await this.starpost!.client.sendPrivate(peer, line);
+    }
     this.starpost!.activity[peer] = Date.now();
   }
 
@@ -527,7 +533,7 @@ export class CasinoWorld implements World {
   }
 
   /** 庄家(权威端):开新手——发 hand 请客座下注,并推本地事件。 */
-  private async bankDealHand(): Promise<void> {
+  private async bankDealHand(reDeal = true): Promise<void> {
     const sp = this.starpost!;
     const session = sp.session!;
     const at = nowIso(this.opts.timezone);
@@ -535,8 +541,10 @@ export class CasinoWorld implements World {
     if (session.game === 'oldmaid') {
       // 抽鬼牌:无下注,开局即发牌;先后手按引擎轮换(奇数手庄家先抽)。
       const om = session.engine as RemoteOldMaid;
-      om.startHand();
-      if (om.state && om.state.turn === 'bank' && !om.state.done) om.bankDraws(); // 庄家先手自动抽
+      if (reDeal) {
+        om.startHand();
+        if (om.state && om.state.turn === 'bank' && !om.state.done) om.bankDraws(); // 庄家先手自动抽
+      }
       if (om.phase === 'done') { await this.bankFinishHand(session, om, at); return; }
       session.lastState = this.kvFromParts(om.stateParts());
       await this.onlineSend(session.peer, onlineLine('hand', om.stateParts()));
@@ -546,7 +554,7 @@ export class CasinoWorld implements World {
     if (session.game === 'holdem') {
       // 德州:无"请下注"消息——startHand 发底牌+盲注,行动权在谁由 afterHoldemAction 统一推进。
       const hd = session.engine as RemoteHoldem;
-      hd.startHand();
+      if (reDeal) hd.startHand();
       await this.afterHoldemAction(session, hd, at);
       return;
     }
@@ -731,6 +739,21 @@ export class CasinoWorld implements World {
       push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
       push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
       this.bankDealHand();
+      // 弱网补偿:start/hand 若因链路抖动丢失,对端会一直显示"空闲"(只有本方进了会话)。
+      // 每 8 秒重发一轮(最多 3 次),直到对端有任何回音(lastIncomingAt 前进)——
+      // 对端侧 start 的重复处理是幂等的(case 'start' 有会话守卫),重发安全。
+      const sentAt = Date.now();
+      const reSend = (n: number): void => {
+        const s2 = this.starpost?.session;
+        if (!s2 || s2 !== sp.session) return;
+        if (s2.lastIncomingAt > sentAt || s2.handsTotal > 0) return; // 对端已有回音
+        if (n <= 0) return;
+        void this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${s2.chips[myId] ?? startChips},${peer}:${s2.chips[peer] ?? startChips}`]))
+          .then(() => this.bankDealHand(false))
+          .catch(() => {});
+        s2.timers.push(setTimeout(() => reSend(n - 1), 8000));
+      };
+      session!.timers.push(setTimeout(() => reSend(3), 8000)); // accept 分支已建会话,session 此处非空
       return;
     }
     if (msg.action === 'decline') {
@@ -1422,8 +1445,17 @@ export class CasinoWorld implements World {
           if (sp.session) return JSON.stringify({ error: `联机会话进行中(${sp.session.game},已 ${sp.session.handsTotal} 手),先 stop 再邀约。` });
           const game = gameOf(), target = targetOf();
           // 主人指示:被对方邀请后不能再向对方发邀约——先回应(accept/decline)再发,避免双向邀约竞态。
-          const incoming = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending' && i.game === game);
-          if (incoming) return JSON.stringify({ error: `你有一封来自 ${target} 的待回应邀约(${incoming.game})。先决定 accept 或 decline,再发起新邀约。`, blockedBy: target, blockedGame: incoming.game });
+          const incoming = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
+          if (incoming) {
+            // 主人规则的自动化解:AI 想玩同一个游戏却撞上对方的待回应邀约 → 自动改为接受对方邀约,
+            // 牌局照样开起来(不再出现"发不出去也回不了"的死端)。
+            if (incoming.game === game) {
+              await sp.client.sendPrivate(target, composeOnlineMessage('accept', incoming.game));
+              incoming.status = 'accepted';
+              return JSON.stringify({ autoAccepted: true, game: incoming.game, target, note: `你与 ${target} 的邀约撞车了:已自动改为接受对方的 ${incoming.game} 邀约,对方(首任庄家)将开局。` });
+            }
+            return JSON.stringify({ error: `你有一封来自 ${target} 的待回应邀约(${incoming.game})。先决定 accept 或 decline,再发起新邀约。`, blockedBy: target, blockedGame: incoming.game });
+          }
           await sp.client.sendPrivate(target, composeOnlineMessage('invite', game));
           this.trackInvite({ direction: 'out', peer: target, game, at: nowIso(this.opts.timezone), status: 'pending' });
           return JSON.stringify({ sent: true, game, target, note: '已发出邀约;对方接受后对方机器先当庄(每手轮换),会话筹码独立于本地。' });
