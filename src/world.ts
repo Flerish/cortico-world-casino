@@ -619,7 +619,7 @@ export class CasinoWorld implements World {
     const at = nowIso(this.opts.timezone);
     const act = (tokens[0] ?? '').toLowerCase();
     if (session.game === 'oldmaid') return await this.bankApplyOldMaidAct(session, engine as RemoteOldMaid, act, at);
-    if (session.game === 'holdem') return await this.bankApplyHoldemAct(session, engine as RemoteHoldem, act, tokens[1], at);
+    if (session.game === 'holdem') return await this.bankApplyHoldemAct(session, engine as RemoteHoldem, act, tokens[1], at, 'player');
     return await this.bankApplyBlackjackAct(session, engine as RemoteBlackjack, act, tokens, at);
   }
 
@@ -697,10 +697,12 @@ export class CasinoWorld implements World {
   }
 
   /** 德州:庄家本机 AI 的动作直接落引擎(不经过对方)。 */
-  private async bankApplyHoldemAct(session: OnlineSessionShape, engine: RemoteHoldem, act: string, amountRaw: string | undefined, at: string): Promise<void> {
+  /** 德州:闲家协议动作(playerAct)或庄家本地动作(bankAct)统一落引擎,再推进。 */
+  private async bankApplyHoldemAct(session: OnlineSessionShape, engine: RemoteHoldem, act: string, amountRaw: string | undefined, at: string, who: 'player' | 'bank' = 'player'): Promise<void> {
     try {
-      const amount = amountRaw !== undefined ? Math.floor(Number(amountRaw)) : undefined;
-      engine.bankAct(act as RemoteHoldemAct, amount);
+      const amount = amountRaw !== undefined && amountRaw !== '' ? Math.floor(Number(amountRaw)) : undefined;
+      if (who === 'bank') engine.bankAct(act as RemoteHoldemAct, amount);
+      else engine.playerAct(act as RemoteHoldemAct, amount);
       await this.afterHoldemAction(session, engine, at);
     } catch (error) {
       this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你的动作未生效:${(error as Error).message}`, at);
@@ -714,7 +716,8 @@ export class CasinoWorld implements World {
     await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
     if (engine.phase === 'bank') {
       const toCall = Math.max(0, Number(session.lastState.toCall ?? 0));
-      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你行动(庄家):街 ${session.lastState.street} · 池 ${session.lastState.pot} · 需跟 ${toCall} · 底牌 ${session.lastState.hole ?? '?'} · 公共牌 ${session.lastState.board ?? '无'}。用 casino_online 的 act(${toCall > 0 ? 'call/raise/fold' : 'bet/check'})行动。`, at);
+      const minR = session.lastState.minRaise ?? '?';
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你行动(庄家):街 ${session.lastState.street} · 池 ${session.lastState.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的底牌 ${session.lastState.hole ?? '?'} · 公共牌 ${session.lastState.board ?? '无'}。用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR}) / check(过牌)`}。`, at);
     }
   }
 
@@ -833,7 +836,8 @@ export class CasinoWorld implements World {
         }
         if (session.game === 'holdem') {
           const toCall = Number(kv.toCall ?? 0);
-          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你行动' : '庄家行动中'}:街 ${kv.street} · 池 ${kv.pot} · 需跟 ${toCall} · 底牌 ${kv.hole} · 公共牌 ${kv.board}。用 casino_online 的 act(${toCall > 0 ? 'fold/call/raise' : 'check/bet'})行动。`);
+          const minR = kv.minRaise ?? '?';
+          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你行动' : '庄家行动中'}:街 ${kv.street} · 池 ${kv.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的底牌 ${kv.hole} · 公共牌 ${kv.board}。${kv.turn === 'you' ? `用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR}) / check(过牌)`}。` : ''}`);
           return;
         }
         push('casino.online_state', `[星邮联机] 轮到你行动:你的点数 ${kv.total ?? '?'} · 庄家明牌 ${kv.dealerUp ?? '?'} · 押注 ${kv.bet ?? '?'} · 可用动作 ${kv.actions ?? '?'}。用 casino_online 的 act(hit/stand/double)行动。`);
@@ -1523,7 +1527,7 @@ export class CasinoWorld implements World {
           if (session.bank === this.myBotId() && session.engine) {
             const at = nowIso(this.opts.timezone);
             if (session.game === 'blackjack') await this.bankApplyBlackjackAct(session, session.engine as RemoteBlackjack, act, [act, ...(act === 'bet' ? [String(args.amount)] : [])], at);
-            else if (session.game === 'holdem') await this.bankApplyHoldemAct(session, session.engine as RemoteHoldem, act, act === 'bet' || act === 'raise' ? String(args.amount ?? '') : undefined, at);
+            else if (session.game === 'holdem') await this.bankApplyHoldemAct(session, session.engine as RemoteHoldem, act, act === 'bet' || act === 'raise' ? String(args.amount ?? '') : undefined, at, 'bank');
             return JSON.stringify({ applied: true, act, note: '动作已落到庄家引擎;结果以事件返回。' });
           }
           const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : [])];
