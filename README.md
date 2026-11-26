@@ -128,3 +128,11 @@ WebUI「扩展」页安装 `cortico-world-casino`,或把本包目录用 `file:` 
 | `src/webui/client.ts` | 面板源码(esbuild 打成 `dist/webui.js`) |
 | `src/webui/strings.ts` | 面板文字 zh/en 表 |
 | `tests/world.test.ts` | 干装载、21 点链路、抽鬼牌不变量、德州限注与摊牌、存档迁移等 |
+
+## 加入「月下牌桌」插件研究交流群
+
+获取最新动态、配置案例与玩法攻略,提出问题、参与功能构想——一起把月下牌桌玩得更好!
+
+![月下牌桌插件研究交流群](docs/group-promo.jpg)
+
+如有任何问题请加群1135333756反馈,您的反馈是我进步的方向。
