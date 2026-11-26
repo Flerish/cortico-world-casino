@@ -549,6 +549,19 @@ export class CasinoWorld implements World {
       session.lastState = this.kvFromParts(om.stateParts());
       await this.onlineSend(session.peer, onlineLine('hand', om.stateParts()));
       this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一局抽鬼牌开始(共 ${session.handsTotal + 1} 局)。庄家 ${om.handDetail()}`, at);
+      if (reDeal) {
+        // 弱网自愈:hand 丢失会让闲家永远等不到开局。每 10 秒重发(最多 3 次),直到对端有回音。
+        const sentAt = Date.now();
+        const reHand = (n: number): void => {
+          const s2 = this.starpost?.session;
+          if (!s2 || s2 !== session) return;
+          if (s2.lastIncomingAt > sentAt) return; // 对端已有回音
+          if (n <= 0) return;
+          void this.onlineSend(session.peer, onlineLine('hand', om.stateParts())).catch(() => {});
+          session.timers.push(setTimeout(() => reHand(n - 1), 10000));
+        };
+        session.timers.push(setTimeout(() => reHand(3), 10000));
+      }
       return;
     }
     if (session.game === 'holdem') {
@@ -672,8 +685,14 @@ export class CasinoWorld implements World {
       session.lastState = this.kvFromParts(engine.stateParts());
       await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
     } catch (error) {
-      await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent((error as Error).message)}`])).catch(() => {});
-      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方动作被拒:${(error as Error).message}`, at);
+      const msgText = (error as Error).message;
+      if (msgText.includes('回合') || msgText.includes('已经结束')) {
+        // 重复抽/错位回合(自动抽与 AI 兜底并存时可能出现):温和地重发当前状态,不发 reject。
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch(() => {});
+        return;
+      }
+      await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent(msgText)}`])).catch(() => {});
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方动作被拒:${msgText}`, at);
     }
   }
 
@@ -796,7 +815,7 @@ export class CasinoWorld implements World {
           // 抽鬼牌:开局即发牌(无下注);轮到闲家时世界层自动抽牌(抽牌是强制动作,无需 AI 决策)。
           const kv = msg.kv;
           push('casino.online_state', `[星邮联机] 新一局抽鬼牌开始,你的手牌 ${kv.cards ?? '?'}(${kv.yourCount ?? '?'} 张),对方 ${kv.oppCount ?? '?'} 张。${kv.turn === 'you' ? '轮到你先抽(已自动执行)。' : '对方先抽,稍候。'}`);
-          if (kv.turn === 'you') void sp.client.sendPrivate(peer, onlineLine('act', ['draw'])).catch(() => {});
+          if (kv.turn === 'you') void this.onlineSend(peer, onlineLine('act', ['draw'])).catch(() => {}); // 走带重试的发送通道
           return;
         }
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
@@ -808,8 +827,8 @@ export class CasinoWorld implements World {
         const kv = msg.kv;
         if (session.game === 'oldmaid') {
           push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你抽牌(已自动执行)' : '庄家抽牌中'}:你 ${kv.yourCount ?? '?'} 张 · 对方 ${kv.oppCount ?? '?'} 张 · 已弃 ${kv.pairs ?? '?'} 对 · 你的手牌 ${kv.cards ?? '?'}。`);
-          // 抽牌是强制动作:轮到闲家时世界层自动抽,不依赖 AI 决策(残局多轮抽牌不再卡住)。
-          if (kv.turn === 'you') void sp.client.sendPrivate(peer, onlineLine('act', ['draw'])).catch(() => {});
+          // 抽牌是强制动作:轮到闲家时世界层自动抽(走带重试的通道);AI 手动抽作为兜底仍然允许。
+          if (kv.turn === 'you') void this.onlineSend(peer, onlineLine('act', ['draw'])).catch(() => {});
           return;
         }
         if (session.game === 'holdem') {
@@ -1498,10 +1517,7 @@ export class CasinoWorld implements World {
           const act = String(args.act ?? '').toLowerCase();
           const validActs = session.game === 'blackjack' ? ['bet', 'hit', 'stand', 'double'] : session.game === 'oldmaid' ? ['draw'] : ['fold', 'check', 'call', 'bet', 'raise'];
           if (!validActs.includes(act)) return JSON.stringify({ error: `${session.game} 的动作集:${validActs.join('/')}` });
-          if (session.game === 'oldmaid' && act === 'draw' && session.bank !== this.myBotId()) {
-            // 闲家的抽牌已自动化(世界层在收到轮次消息时自动抽),AI 手动 draw 无需也不会重复发送。
-            return JSON.stringify({ note: '抽鬼牌的抽牌已自动化:轮到你时系统会自动抽牌,无需手动操作,等事件通知即可。' });
-          }
+          // 闲家的自动抽牌失败时,AI 的手动 draw 是兜底通道——允许发送(重复抽会被庄家温和拒绝,无副作用)。
           if (act === 'bet' && !Number.isSafeInteger(Number(args.amount))) return JSON.stringify({ error: 'bet 需要整数金额(amount)' });
           // 我是庄家:动作直接落本地引擎;否则发协议给庄家。
           if (session.bank === this.myBotId() && session.engine) {
