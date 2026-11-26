@@ -751,7 +751,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
             render(ctx, lastRealSnapshot ?? (current as Snapshot));
             return;
           }
-          let spec: Record<string, any>;
+          let spec: Record<string, any> | null;
           try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = null; }
           if (!spec?.snapshot) return; // 拉取失败:保持当前牌桌,下一秒重试(避免与大厅渲染交替闪烁)
           const snapJson = JSON.stringify(spec.snapshot);
