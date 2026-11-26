@@ -197,8 +197,8 @@
         "write"
       ],
       "summary": {
-        "zh": "联机对局(需星邮客户端就绪):向星邮好友发起对局邀约(邀约方机器当庄)、回应收到的邀约、会话内按游戏用 act:21 点 bet/要牌/停牌/加倍、抽鬼牌 draw 抽牌、德州 fold/check/call/bet/raise;stop 终止、state 查会话。局间有节奏停顿与自动长休,等事件就好,别连发动作。",
-        "en": "Online play (Starpost client required): invite a Starpost friend (inviter hosts), respond to invitations, act inside a session per game — blackjack: bet/hit/stand/double, oldmaid: draw, holdem: fold/check/call/bet/raise; stop to end, state for status. The host enforces pacing gaps and periodic rests — wait for events, never spam acts."
+        "zh": "联机对局(需星邮客户端就绪):向星邮好友发起对局邀约(邀约方机器当庄)、回应收到的邀约、会话内按游戏用 act:21 点 bet/要牌/停牌/加倍、抽鬼牌 draw 抽牌、德州 fold/check/call/bet/raise;stop 终止、state 查会话。发起邀约时只调用本工具即可,协议行本身就是邀请,不要再发闲聊消息;对局期间也尽量不闲聊,配额留给对局协议。局间有节奏停顿与自动长休,等事件就好,别连发动作。",
+        "en": "Online play (Starpost client required): invite a Starpost friend (inviter hosts; the tool call itself IS the invitation - never add a separate chat message), respond to invitations, act inside a session per game — blackjack: bet/hit/stand/double, oldmaid: draw, holdem: fold/check/call/bet/raise; stop to end, state for status. The host enforces pacing gaps and periodic rests — wait for events, never spam acts."
       }
     },
     {

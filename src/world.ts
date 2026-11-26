@@ -525,7 +525,14 @@ export class CasinoWorld implements World {
     if (!session) return;
     for (const t of session.timers) clearTimeout(t);
     if (notifyPeer) {
-      await this.onlineSend(session.peer, onlineLine('stop', [`reason=${encodeURIComponent(reason)}`])).catch(() => {});
+      // 终止通知带三次重发(间隔 5 秒):链路抖动丢一次 stop,对端就会永远停在"游戏中"。
+      // 对端重复处理 stop 是幂等的(无会话直接忽略),多发无害。
+      void (async (): Promise<void> => {
+        for (let i = 0; i < 3; i++) {
+          await this.onlineSend(session.peer, onlineLine('stop', [`reason=${encodeURIComponent(reason)}`])).catch(() => {});
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+      })();
     }
     sp.session = null;
     console.log(`[casino] 会话结束(${reason}):庄家=${session.bank} 对手=${session.peer}`);
@@ -717,7 +724,7 @@ export class CasinoWorld implements World {
     if (engine.phase === 'bank') {
       const toCall = Math.max(0, Number(session.lastState.toCall ?? 0));
       const minR = session.lastState.minRaise ?? '?';
-      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你行动(庄家):街 ${session.lastState.street} · 池 ${session.lastState.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的底牌 ${session.lastState.hole ?? '?'} · 公共牌 ${session.lastState.board ?? '无'}。用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR}) / check(过牌)`}。`, at);
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你行动(庄家):街 ${session.lastState.street} · 池 ${session.lastState.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的筹码 ${session.lastState.myChips ?? '?'} · 对方筹码 ${session.lastState.oppChips ?? '?'} · 你的底牌 ${session.lastState.hole ?? '?'} · 公共牌 ${session.lastState.board ?? '无'}。用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR};筹码不足最小加注额时可直接全押)`}。`, at);
     }
   }
 
@@ -837,7 +844,7 @@ export class CasinoWorld implements World {
         if (session.game === 'holdem') {
           const toCall = Number(kv.toCall ?? 0);
           const minR = kv.minRaise ?? '?';
-          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你行动' : '庄家行动中'}:街 ${kv.street} · 池 ${kv.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的底牌 ${kv.hole} · 公共牌 ${kv.board}。${kv.turn === 'you' ? `用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR}) / check(过牌)`}。` : ''}`);
+          push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你行动' : '庄家行动中'}:街 ${kv.street} · 池 ${kv.pot} · 需跟 ${toCall} · 最小加注额 ${minR} · 你的筹码 ${kv.myChips ?? '?'} · 对方筹码 ${kv.oppChips ?? '?'} · 你的底牌 ${kv.hole} · 公共牌 ${kv.board}。${kv.turn === 'you' ? `用 casino_online 的 act 行动:${toCall > 0 ? `call(跟注) / raise X(先跟注再加 X,最小 ${minR}) / fold(弃牌)` : `bet X(下注,最小 ${minR};筹码不足最小加注额时可直接全押)`}。` : ''}`);
           return;
         }
         push('casino.online_state', `[星邮联机] 轮到你行动:你的点数 ${kv.total ?? '?'} · 庄家明牌 ${kv.dealerUp ?? '?'} · 押注 ${kv.bet ?? '?'} · 可用动作 ${kv.actions ?? '?'}。用 casino_online 的 act(hit/stand/double)行动。`);

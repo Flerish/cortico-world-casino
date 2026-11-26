@@ -137,18 +137,22 @@ export class RemoteHoldem {
       }
       case 'bet': {
         if (toCall > 0) throw new Error('有人已下注,应跟注或加注');
-        if (!Number.isSafeInteger(amount) || (amount as number) < st.minRaise) throw new Error(`下注至少 ${st.minRaise}`);
+        if (!Number.isSafeInteger(amount) || (amount as number) <= 0) throw new Error('下注需为正整数金额');
+        // 全押豁免:筹码不足最小加注额时,允许直接全押(否则玩家被锁死无法操作)。
+        if ((amount as number) < seat.chips && (amount as number) < st.minRaise) throw new Error(`下注至少 ${st.minRaise},筹码不足时可直接全押 ${seat.chips}`);
         commit(amount as number);
-        st.currentBet = seat.street;
+        st.currentBet = Math.max(st.currentBet, seat.street);
         st.acted[this.other(who)] = false;
         break;
       }
       case 'raise': {
         if (toCall <= 0) throw new Error('无人下注,应下注(bet)');
-        if (!Number.isSafeInteger(amount) || (amount as number) < st.minRaise) throw new Error(`加注至少 ${st.minRaise}`);
+        if (!Number.isSafeInteger(amount) || (amount as number) <= 0) throw new Error('加注需为正整数金额');
+        // 全押豁免:跟注加加注额超过自己筹码(即不足最小加注)时,允许直接全押。
+        if (toCall + (amount as number) < seat.chips && (amount as number) < st.minRaise) throw new Error(`加注至少 ${st.minRaise},筹码不足时可直接全押`);
         commit(toCall + (amount as number));
-        st.minRaise = amount as number;
-        st.currentBet = seat.street;
+        st.minRaise = Math.max(st.minRaise, amount as number);
+        st.currentBet = Math.max(st.currentBet, seat.street);
         st.acted[this.other(who)] = false;
         break;
       }
@@ -266,6 +270,8 @@ export class RemoteHoldem {
       `pot=${st.pot}`,
       `toCall=${Math.max(0, st.currentBet - st.seats.player.street)}`,
       `minRaise=${st.minRaise}`,
+      `myChips=${st.seats.player.chips}`,
+      `oppChips=${st.seats.bank.chips}`,
       `hole=${st.hole.player.map((c) => formatCard(c)).join(',') || 'none'}`,
       `board=${st.community.map((c) => formatCard(c)).join(',') || 'none'}`,
       `button=${st.button}`,

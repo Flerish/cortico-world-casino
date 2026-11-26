@@ -16,9 +16,11 @@ export type StarpostPost = (
 export const STARPOST_LIMITS = {
   private: 10,
   groups: 5,
-  maxMessagesPerDay: 300,
+  // 联机牌局的协议消息(state/act 每手 15-30 条)全部计入配额:
+  // 旧值(300/天,时段 60)会让一局德州打到一半就被静默——大幅上调。
+  maxMessagesPerDay: 2000,
   maxWerewolfGamesPerDay: 0,
-  periods: { morning: 60, afternoon: 60, sleep: 6 },
+  periods: { morning: 800, afternoon: 800, evening: 800, sleep: 200 },
 } as const;
 
 export class StarpostError extends Error {}
