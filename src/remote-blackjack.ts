@@ -163,6 +163,23 @@ export class RemoteBlackjack {
     return [`total=${handValue(h.playerCards).total}`, `dealerUp=${handValue([h.dealerCards[0]!]).total}`, `up=${formatCard(h.dealerCards[0]!)}`, `bet=${h.bet}`, `cards=${h.playerCards.map((c) => formatCard(c)).join(',')}`, `actions=${this.availableActions().join(',') || 'none'}`];
   }
 
+  /** 庄家视角的手牌摘要(观战用):只给庄家自己的牌与闲家明牌张数,不泄露闲家具体牌面。
+   * 进行中庄家暗牌仍盖着(holeHidden),与单机"进行中不泄底"原则一致。 */
+  bankStateParts(): string[] {
+    const h = this.hand!;
+    const dealerVisible = h.holeHidden ? h.dealerCards.slice(0, 1) : h.dealerCards;
+    return [
+      `total=${handValue(h.dealerCards).total}`,
+      `dealerUp=${handValue([h.dealerCards[0]!]).total}`,
+      `up=${formatCard(h.dealerCards[0]!)}`,
+      `bet=${h.bet}`,
+      `cards=${dealerVisible.map((c) => formatCard(c)).join(',')}`,
+      `oppCount=${h.playerCards.length}`,
+      `holeHidden=${h.holeHidden}`,
+      `actions=none`,
+    ];
+  }
+
   /** 结算通报——协议 settle 消息的参数体(settle 即亮庄家牌,观战可见)。 */
   settleParts(): string[] | null {
     if (!this.lastSettle || !this.hand) return null;

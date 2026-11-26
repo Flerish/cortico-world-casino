@@ -3,6 +3,7 @@
  * 按钮每手轮换(两人桌按钮即小盲);街:preflop/flop/turn/river;下注轮双方匹配且行动过
  * 才进下一街;全押不足时未跟齐部分退回、自动发完摊牌;摊牌七选五比牌(与本地同一套
  * comparePokerHands)。双方 AI 都真实决策:庄家侧动作由本机 AI 经 tool 落到引擎。
+ * 单街封顶 streetCap 与本地德州一致(默认 maxBet);raise 的 amount 语义为"本街投入到的总额"。
  */
 import { bestPokerHand, comparePokerHands, formatCard, freshDeck, shuffled, type Card } from './cards.ts';
 
@@ -10,6 +11,8 @@ export interface RemoteHoldemOptions {
   bigBlind: number;
   bankChips: number;
   playerChips: number;
+  /** 单街下注/加注封顶(与本地德州 maxBet 同口径);缺省不封顶。 */
+  streetCap?: number;
   rng?: () => number;
   /** 测试注入固定牌序(数组尾部先发)。 */
   deck?: Card[];
@@ -64,6 +67,7 @@ export class RemoteHoldem {
 
   private seat(who: 'bank' | 'player'): RemoteHoldemSeat { return this.state!.seats[who]; }
   private other(who: 'bank' | 'player'): 'bank' | 'player' { return who === 'bank' ? 'player' : 'bank'; }
+  private cap(): number { return this.opts.streetCap && this.opts.streetCap > 0 ? this.opts.streetCap : Infinity; }
 
   /** 开一手:按钮轮换、发底牌、自动盲注;盲注阶段全押直接发完摊牌。 */
   startHand(): void {
@@ -114,6 +118,7 @@ export class RemoteHoldem {
     const seat = this.seat(who);
     if (seat.folded) throw new Error('你已经弃牌');
     const toCall = st.currentBet - seat.street;
+    const cap = this.cap();
     const commit = (n: number): void => {
       const pay = Math.min(n, seat.chips);
       seat.chips -= pay; seat.street += pay; seat.committed += pay;
@@ -138,9 +143,12 @@ export class RemoteHoldem {
       case 'bet': {
         if (toCall > 0) throw new Error('有人已下注,应跟注或加注');
         if (!Number.isSafeInteger(amount) || (amount as number) <= 0) throw new Error('下注需为正整数金额');
+        const a = amount as number;
+        // 单街封顶(与本地一致);全押豁免:筹码不足封顶时允许直接全押。
+        if (a > cap && a < seat.chips) throw new Error(`单街下注封顶 ${cap}`);
         // 全押豁免:筹码不足最小加注额时,允许直接全押(否则玩家被锁死无法操作)。
-        if ((amount as number) < seat.chips && (amount as number) < st.minRaise) throw new Error(`下注至少 ${st.minRaise},筹码不足时可直接全押 ${seat.chips}`);
-        commit(amount as number);
+        if (a < seat.chips && a < st.minRaise) throw new Error(`下注至少 ${st.minRaise},筹码不足时可直接全押 ${seat.chips}`);
+        commit(a);
         st.currentBet = Math.max(st.currentBet, seat.street);
         st.acted[this.other(who)] = false;
         break;
@@ -148,10 +156,16 @@ export class RemoteHoldem {
       case 'raise': {
         if (toCall <= 0) throw new Error('无人下注,应下注(bet)');
         if (!Number.isSafeInteger(amount) || (amount as number) <= 0) throw new Error('加注需为正整数金额');
-        // 全押豁免:跟注加加注额超过自己筹码(即不足最小加注)时,允许直接全押。
-        if (toCall + (amount as number) < seat.chips && (amount as number) < st.minRaise) throw new Error(`加注至少 ${st.minRaise},筹码不足时可直接全押`);
-        commit(toCall + (amount as number));
-        st.minRaise = Math.max(st.minRaise, amount as number);
+        // amount 语义与本地德州一致:本街投入到的总额(target),而非"跟注之外再加多少"。
+        const target = amount as number;
+        const minTo = st.currentBet + st.minRaise;
+        if (target <= st.currentBet) throw new Error(`加注须高于当前注 ${st.currentBet}(至少到 ${minTo})`);
+        if (target > cap && target < seat.street + seat.chips) throw new Error(`单街加注封顶 ${cap}`);
+        // 全押豁免:目标额恰好押光自己筹码且不足常规最小加注时放行。
+        const shortAllIn = target === seat.street + seat.chips && target < minTo;
+        if (target < minTo && !shortAllIn) throw new Error(`加注至少到 ${minTo},筹码不足时可直接全押`);
+        commit(target - seat.street);
+        st.minRaise = Math.max(st.minRaise, target - st.currentBet);
         st.currentBet = Math.max(st.currentBet, seat.street);
         st.acted[this.other(who)] = false;
         break;
@@ -279,6 +293,30 @@ export class RemoteHoldem {
       `myAllIn=${st.seats.player.allIn}`,
       `oppAllIn=${st.seats.bank.allIn}`,
       `hole=${st.hole.player.map((c) => formatCard(c)).join(',') || 'none'}`,
+      `board=${st.community.map((c) => formatCard(c)).join(',') || 'none'}`,
+      `button=${st.button}`,
+    ];
+  }
+
+  /** 庄家视角 state 参数体(观战用):my=庄家自己,hole 只给庄家底牌,不泄露闲家底牌。 */
+  bankStateParts(): string[] {
+    const st = this.state;
+    if (!st) return [];
+    return [
+      `turn=${st.turn === 'bank' ? 'you' : 'player'}`,
+      `street=${st.street}`,
+      `pot=${st.pot}`,
+      `toCall=${Math.max(0, st.currentBet - st.seats.bank.street)}`,
+      `minRaise=${st.minRaise}`,
+      `myChips=${st.seats.bank.chips}`,
+      `oppChips=${st.seats.player.chips}`,
+      `myCommitted=${st.seats.bank.committed}`,
+      `oppCommitted=${st.seats.player.committed}`,
+      `myFolded=${st.seats.bank.folded}`,
+      `oppFolded=${st.seats.player.folded}`,
+      `myAllIn=${st.seats.bank.allIn}`,
+      `oppAllIn=${st.seats.player.allIn}`,
+      `hole=${st.hole.bank.map((c) => formatCard(c)).join(',') || 'none'}`,
       `board=${st.community.map((c) => formatCard(c)).join(',') || 'none'}`,
       `button=${st.button}`,
     ];

@@ -734,6 +734,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         openInviteOverlay(plus.dataset.nick ?? '', plus.dataset.id ?? '');
       });
       const refresh = async (): Promise<void> => {
+        // "继续/重新开始"确认弹窗是模态决策框:存在时本轮跳过重建,否则 1s 轮询会把它冲掉。
+        // (邀约弹窗的游戏按钮点击即自行关闭,不在此列;观战分支有自己的快照跳过逻辑。)
+        if (wrap.querySelector('.rules-overlay .btnrow .primary')) {
+          const txt = wrap.querySelector('.rules-overlay .btnrow .primary')?.textContent ?? '';
+          if (txt === T.gamePicker.resumeContinue) return;
+        }
         let data: Record<string, any>;
         try {
           data = await ctx.invoke<Record<string, any>>('online', []);
@@ -792,6 +798,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
           }
           let spec: Record<string, any> | null;
           try { spec = await ctx.invoke<Record<string, any>>('spectate', []); } catch { spec = null; }
+          // 退出竞态守卫:await 往返期间用户可能已点横幅「退出」(置 ui.spectate=false 并渲染回大厅)。
+          // 此时必须丢弃本次观战渲染,否则会把大厅覆盖回牌桌,而横幅已被清无法再退,画面在两者间反复闪烁。
+          if (!ui.spectate) return;
           if (!spec?.snapshot) return; // 拉取失败:保持当前牌桌,下一秒重试(避免与大厅渲染交替闪烁)
           const snapJson = JSON.stringify(spec.snapshot);
           if (snapJson === lastSpectateJson) return; // 快照无变化:不重渲染(退出按钮稳定可点)

@@ -173,8 +173,8 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
         action: { type: 'string', enum: ['invite', 'accept', 'decline', 'act', 'stop', 'state', 'list'], description: 'What to do.' },
         target: { type: 'string', description: 'invite/accept/decline: the friend botId.' },
         game: { type: 'string', enum: ['blackjack', 'oldmaid', 'holdem'], description: 'invite: which game.' },
-        act: { type: 'string', enum: ['bet', 'hit', 'stand', 'double'], description: 'act: which move (only when an online_state event asks for it).' },
-        amount: { type: 'number', description: 'act=bet: the stake.' },
+        act: { type: 'string', enum: ['bet', 'hit', 'stand', 'double', 'draw', 'fold', 'check', 'call', 'raise'], description: 'act: which move (only when an online_state event asks for it). blackjack: bet/hit/stand/double; oldmaid: draw; holdem: fold/check/call/bet/raise.' },
+        amount: { type: 'number', description: 'act=bet: the stake. act=raise (holdem): the street total to raise to (same semantics as local holdem_act).' },
       },
       required: ['action'],
     },
@@ -239,6 +239,8 @@ export interface OnlineSessionShape {
   lastState: Record<string, string> | null;
   /** 最近一次 settle 消息参数(kv,观战视图用)。 */
   lastSettle: Record<string, string> | null;
+  /** 协议消息连续发送失败次数(配额耗尽/链路中断时累加;收到对方消息或发送成功即清零)。 */
+  sendFails?: number;
 }
 
 export class CasinoWorld implements World {
@@ -377,7 +379,17 @@ export class CasinoWorld implements World {
       const state: StarpostState = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: null, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null, presenceTimer: null };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
-      void client.snapshot(true)
+      // 启动瞬间网络抖动会让首次 snapshot 失败;自动重试(最多 5 次,间隔递增),避免联机永久瘫痪。
+      const verifyWithRetry = async (attempt: number): Promise<any> => {
+        try {
+          return await client.snapshot(true);
+        } catch (e) {
+          if (attempt >= 5 || this.starpost !== state) throw e;
+          await new Promise((r) => setTimeout(r, Math.min(30000, 3000 * attempt)));
+          return verifyWithRetry(attempt + 1);
+        }
+      };
+      void verifyWithRetry(1)
         .then((snap) => {
           if (snap?.botId && snap.botId !== client.botId) throw new Error(`服务器返回的账号 (${snap.botId}) 与配置的 botId 不一致`);
           state.friendsCache = { fetchedAt: Date.now(), list: (snap?.friendProfiles ?? []).map((p: Record<string, unknown>) => ({ id: String(p.botId ?? p.id ?? ''), nickname: p.nickname as string | undefined, bot: p.accountType === 'bot' })) };
@@ -495,7 +507,7 @@ export class CasinoWorld implements World {
   /** 按游戏建远程引擎;测试牌序仅注入 21 点(其余用 rng)。 */
   private newRemoteEngine(game: OnlineGame, startChips: number): RemoteBlackjack | RemoteOldMaid | RemoteHoldem {
     if (game === 'oldmaid') return new RemoteOldMaid({ stake: this.opts.cfg.minBet, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
-    if (game === 'holdem') return new RemoteHoldem({ bigBlind: this.opts.cfg.holdemBlind, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
+    if (game === 'holdem') return new RemoteHoldem({ bigBlind: this.opts.cfg.holdemBlind, streetCap: this.opts.cfg.maxBet, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
     return new RemoteBlackjack({
       bankChips: startChips, playerChips: startChips,
       minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
@@ -518,9 +530,25 @@ export class CasinoWorld implements World {
       await this.starpost!.client.sendPrivate(peer, line);
     } catch (error) {
       await new Promise((r) => setTimeout(r, 2000));
-      await this.starpost!.client.sendPrivate(peer, line);
+      await this.starpost!.client.sendPrivate(peer, line); // 仍失败则抛出,由调用方/脱困逻辑处理
     }
     this.starpost!.activity[peer] = Date.now();
+    const session = this.starpost!.session;
+    if (session && session.peer === peer) session.sendFails = 0; // 发送成功:清零失败计数
+  }
+
+  /** 协议发送失败的脱困处理:连续多次发不出去(典型为星邮配额耗尽被服务器持续拒绝,
+   * 或链路长时间中断),主动结束会话并告知双方,避免牌局永久卡死干等。
+   * 阈值 6 次:单次 onlineSend 已含 1 次重试,6 次≈十余条协议消息全失败,足以判定不是偶发抖动。 */
+  private noteSendFailure(peer: string): void {
+    const sp = this.starpost;
+    const session = sp?.session;
+    if (!sp || !session || session.peer !== peer) return;
+    session.sendFails = (session.sendFails ?? 0) + 1;
+    if (session.sendFails >= 6) {
+      console.log(`[casino] 协议消息连续 ${session.sendFails} 次发送失败,判定配额耗尽/链路中断,自动脱困结束会话`);
+      void this.closeOnlineSession('星邮配额耗尽或链路中断,自动结束(稍后可重新邀约)', true);
+    }
   }
 
   /** 联机事件推送。 */
@@ -541,12 +569,14 @@ export class CasinoWorld implements World {
       // 对端重复处理 stop 是幂等的(无会话直接忽略),多发无害。
       void (async (): Promise<void> => {
         for (let i = 0; i < 3; i++) {
+          if ((session as OnlineSessionShape & { closed?: boolean }).closed && i > 0) return; // 会话已被新开局取代则不再续发
           await this.onlineSend(session.peer, onlineLine('stop', [`reason=${encodeURIComponent(reason)}`])).catch(() => {});
           await new Promise((r) => setTimeout(r, 5000));
         }
       })();
     }
     sp.session = null;
+    (session as OnlineSessionShape & { closed?: boolean }).closed = true; // 重发循环据此退场,防止向已终止对端续发
     console.log(`[casino] 会话结束(${reason}):庄家=${session.bank} 对手=${session.peer}`);
     this.onlineEvent('casino.online_session', session.peer, `[星邮联机] ${session.game} 会话结束(${reason})。牌桌回到本地模式。`, nowIso(this.opts.timezone));
   }
@@ -573,7 +603,7 @@ export class CasinoWorld implements World {
         const sentAt = Date.now();
         const reHand = (n: number): void => {
           const s2 = this.starpost?.session;
-          if (!s2 || s2 !== session) return;
+          if (!s2 || s2 !== session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return; // 会话已关闭:退场
           if (s2.lastIncomingAt > sentAt) return; // 对端已有回音
           if (n <= 0) return;
           void this.onlineSend(session.peer, onlineLine('hand', om.stateParts())).catch(() => {});
@@ -590,7 +620,7 @@ export class CasinoWorld implements World {
       await this.afterHoldemAction(session, hd, at);
       return;
     }
-    await this.onlineSend(session.peer, onlineLine('hand')).catch((e) => { sp.lastError = (e as Error).message; });
+    await this.onlineSend(session.peer, onlineLine('hand')).catch((e) => { sp.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一手开始,已请 ${session.peer} 下注(会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]})。`, at);
   }
 
@@ -604,7 +634,7 @@ export class CasinoWorld implements World {
     const restMs = Math.max(1000, Math.floor(Number(cfg.onlineRestMs) || 300000));
     const at = nowIso(this.opts.timezone);
     if (restAfter > 0 && session.handsTotal % restAfter === 0 && session.handsTotal > 0) {
-      const minutes = Math.round(restMs / 60000);
+      const minutes = Math.max(1, Math.ceil(restMs / 60000)); // 向上取整且至少 1,避免短休显示"0 分钟"
       void this.onlineSend(session.peer, onlineLine('rest', [`minutes=${minutes}`]));
       this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 已连续 ${session.handsTotal} 手,进入 ${minutes} 分钟休息(防止消耗过大,到点自动换庄继续)。`, at);
       session.restUntil = Date.now() + restMs;
@@ -624,7 +654,7 @@ export class CasinoWorld implements World {
     const handsPart = `hands=${session.handsTotal}`;
     session.engine = null;           // 我交出权威端,变为客座
     session.bank = session.peer;     // 对方坐庄
-    await this.onlineSend(session.peer, onlineLine('handoff', [chipsPart, handsPart])).catch((e) => { sp.lastError = (e as Error).message; });
+    await this.onlineSend(session.peer, onlineLine('handoff', [chipsPart, handsPart])).catch((e) => { sp.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 一手结束,庄家轮换:接下来由 ${session.peer} 坐庄(共 ${session.handsTotal} 手)。`, nowIso(this.opts.timezone));
   }
 
@@ -650,7 +680,7 @@ export class CasinoWorld implements World {
     const settleBody = engine.settleParts();
     if (settleBody) {
       session.lastSettle = this.kvFromParts(settleBody);
-      await this.onlineSend(session.peer, onlineLine('settle', settleBody));
+      await this.onlineSend(session.peer, onlineLine('settle', settleBody)).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     }
     const s2 = engine.lastSettle!;
     const bankIsMe = session.bank === this.myBotId();
@@ -672,7 +702,7 @@ export class CasinoWorld implements World {
         const phaseNow: string = engine.phase;
         session.lastState = this.kvFromParts(engine.stateParts());
         if (phaseNow === 'done') { await this.bankFinishHand(session, engine, at); return; } // 自然黑杰克立即结算
-        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
         this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方押注 ${engine.bet}。${engine.handDetail()}`, at);
         return;
       }
@@ -683,7 +713,7 @@ export class CasinoWorld implements World {
       else throw new Error(`未知动作 ${act}(可用 bet/hit/stand/double)`);
       if (engine.phase === 'player') {
         session.lastState = this.kvFromParts(engine.stateParts());
-        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
         this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方行动后:${engine.handDetail()}`, at);
         return;
       }
@@ -702,7 +732,7 @@ export class CasinoWorld implements World {
       engine.bankDraws(); // 庄家自动回抽(无选择空间)
       if (engine.phase === 'done') { await this.bankFinishHand(session, engine, at); return; }
       session.lastState = this.kvFromParts(engine.stateParts());
-      await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+      await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     } catch (error) {
       const msgText = (error as Error).message;
       if (msgText.includes('回合') || msgText.includes('已经结束')) {
@@ -724,7 +754,12 @@ export class CasinoWorld implements World {
       else engine.playerAct(act as RemoteHoldemAct, amount);
       await this.afterHoldemAction(session, engine, at);
     } catch (error) {
-      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你的动作未生效:${(error as Error).message}`, at);
+      const msgText = (error as Error).message;
+      // 客座动作被拒时必须回发 reject,否则对端永远等不到反馈(与 21 点/抽鬼牌一致)。
+      if (who === 'player') {
+        await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent(msgText)}`])).catch(() => {});
+      }
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] ${who === 'player' ? '对方' : '你的'}动作未生效:${msgText}`, at);
     }
   }
 
@@ -732,7 +767,7 @@ export class CasinoWorld implements World {
   private async afterHoldemAction(session: OnlineSessionShape, engine: RemoteHoldem, at: string): Promise<void> {
     if (engine.phase === 'done') { await this.bankFinishHand(session, engine, at); return; }
     session.lastState = this.kvFromParts(engine.stateParts());
-    await this.onlineSend(session.peer, onlineLine('state', engine.stateParts()));
+    await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     if (engine.phase === 'bank') {
       const toCall = Math.max(0, Number(session.lastState.toCall ?? 0));
       const minR = session.lastState.minRaise ?? '?';
@@ -786,11 +821,11 @@ export class CasinoWorld implements World {
       const sentAt = Date.now();
       const reSend = (n: number): void => {
         const s2 = this.starpost?.session;
-        if (!s2 || s2 !== sp.session) return;
+        if (!s2 || s2 !== sp.session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return; // 会话已关闭/被取代:退场
         if (s2.lastIncomingAt > sentAt || s2.handsTotal > 0) return; // 对端已有回音
         if (n <= 0) return;
         void this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${s2.chips[myId] ?? startChips},${peer}:${s2.chips[peer] ?? startChips}`]))
-          .then(() => this.bankDealHand(false))
+          .then(() => { if (this.starpost?.session === s2) void this.bankDealHand(false); })
           .catch(() => {});
         s2.timers.push(setTimeout(() => reSend(n - 1), 8000));
       };
@@ -806,7 +841,7 @@ export class CasinoWorld implements World {
     }
 
     // —— 会话层:start 创建客座会话;其余动作需已有会话且来自对手 ——
-    if (session && session.peer === peer) session.lastIncomingAt = Date.now();
+    if (session && session.peer === peer) { session.lastIncomingAt = Date.now(); session.sendFails = 0; } // 链路恢复:清零失败计数
     switch (msg.action) {
       case 'start': {
         // 双向开局仲裁(最终裁决):双方互 accept 后会各建庄家会话、各发一份 start——
@@ -1314,7 +1349,7 @@ export class CasinoWorld implements World {
         dealerActing: bj.phase === 'dealer',
         hands: [{
           cards: playerCards.map((c) => formatCard(c)),
-          total: playerCards.length ? playerCards.reduce((acc, c) => acc + c.rank, 0) : null,
+          total: playerCards.length ? handValue(playerCards).total : null,
           bet,
           doubled: false,
           outcome,
@@ -1322,8 +1357,8 @@ export class CasinoWorld implements World {
         }],
         activeHand: 0,
         dealerCards: dealerVisible.map((c) => formatCard(c)),
-        dealerVisibleTotal: dealerVisible.length ? dealerVisible.reduce((acc, c) => acc + c.rank, 0) : null,
-        dealerTotal: dealerCards.length ? dealerCards.reduce((acc, c) => acc + c.rank, 0) : null,
+        dealerVisibleTotal: dealerVisible.length ? handValue(dealerVisible).total : null,
+        dealerTotal: dealerCards.length ? handValue(dealerCards).total : null,
         holeCount: dealerCards.length - dealerVisible.length,
         lastResult: settle ? {
           dealer: aiRole === 'ai' ? 'ai' : 'player',
@@ -1443,7 +1478,7 @@ export class CasinoWorld implements World {
       minRaise: st.minRaise,
       pot: st.pot,
       community: st.community.map((c) => formatCard(c)),
-      playerCards: peerCards.map((c) => formatCard(c)),
+      playerCards: st.street === 'showdown' || Boolean(settle) ? peerCards.map((c) => formatCard(c)) : [],
       aiCards: st.street === 'showdown' || Boolean(settle) ? myCards.map((c) => formatCard(c)) : null,
       aiHoleCount: myCards.length,
       aiCommitted: mySeat.committed,
@@ -1602,7 +1637,13 @@ export class CasinoWorld implements World {
             return JSON.stringify({ applied: true, act, note: '动作已落到庄家引擎;结果以事件返回。' });
           }
           const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : [])];
-          await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
+          try {
+            await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
+            session.sendFails = 0;
+          } catch (e) {
+            this.noteSendFailure(session.peer);
+            return JSON.stringify({ error: `动作发送失败:${(e as Error).message}(若配额耗尽,牌局会自动结束)`, failed: true });
+          }
           return JSON.stringify({ sent: true, act, note: '动作已发给庄家;结果以 casino.online_state / casino.online_result 事件返回。' });
         }
         case 'stop': {
@@ -1803,9 +1844,11 @@ export class CasinoWorld implements World {
       bj.holeRevealed = true;
       // 先离开 betting 阶段:停顿期间重复下注会导致双重结算。
       bj.phase = 'playerActing';
+      (bj as BlackjackState & { dealing?: boolean }).dealing = true; // 异步发牌未落定,挡住清桌类操作
       this.save();
       this.broadcast();
       await this.sleep();
+      (bj as BlackjackState & { dealing?: boolean }).dealing = false;
       // 停顿期间可能被「返回大厅」清桌:此时不再结算,收口即可。
       if (this.state?.blackjack !== bj || this.state?.game !== 'blackjack') return mt.returnedToLobby;
       return this.settle();
@@ -1832,9 +1875,12 @@ export class CasinoWorld implements World {
     bj.phase = 'playerActing';
     if (handValue(bj.dealerCards).natural) {
       bj.holeRevealed = true;
+      (bj as BlackjackState & { dealing?: boolean }).dealing = true;
       this.save();
       this.broadcast();
       await this.sleep();
+      (bj as BlackjackState & { dealing?: boolean }).dealing = false;
+      if (this.state?.blackjack !== bj || this.state?.game !== 'blackjack') return { ok: true, text: this.mt().returnedToLobby };
       return { ok: true, text: this.settle() };
     }
     this.save();
@@ -1850,12 +1896,13 @@ export class CasinoWorld implements World {
     this.save();
     this.broadcast();
     await this.sleep();
-    while (dealerShouldHit(bj.dealerCards, this.opts.cfg.dealerHitsSoft17)) {
+    while (this.state?.blackjack === bj && this.state?.game === 'blackjack' && dealerShouldHit(bj.dealerCards, this.opts.cfg.dealerHitsSoft17)) {
       bj.dealerCards.push(this.draw());
       this.save();
       this.broadcast();
       await this.sleep();
     }
+    if (this.state?.blackjack !== bj || this.state?.game !== 'blackjack') return this.mt().returnedToLobby;
     bj.dealerActing = false;
     return this.settle();
   }
@@ -2696,6 +2743,7 @@ export class CasinoWorld implements World {
       // settle 模型下筹码全程未动账,挂起无损;异步中段(庄家打牌/发牌)不允许中途离开。
       if (state.game === null) return this.snapshot();
       if (state.blackjack?.dealerActing) throw new Error(mt.dealerTurnInProgress);
+      if ((state.blackjack as (BlackjackState & { dealing?: boolean }) | null)?.dealing) throw new Error(mt.dealerTurnInProgress);
       if (state.holdem && state.holdem.phase === 'runout') throw new Error(mt.holdemDealing);
       const leaving = state.game;
       state.game = null;
@@ -2718,6 +2766,8 @@ export class CasinoWorld implements World {
     }
     if (action === 'resetmatch') {
       if (state.blackjack?.dealerActing) throw new Error(mt.matchResetDealerPlaying);
+      // 自然黑杰克发牌停顿 / 保险结算停顿期间异步未落定,清桌会让 settle 访问空对象;一并挡住。
+      if ((state.blackjack as (BlackjackState & { dealing?: boolean }) | null)?.dealing) throw new Error(mt.matchResetDealerPlaying);
       if (state.holdem && state.holdem.phase !== 'idle') throw new Error(mt.matchResetBusy);
       this.recordMatchAndReset();
       return this.snapshot();

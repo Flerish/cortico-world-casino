@@ -59,7 +59,9 @@ export function parseOnlineMessage(text: string): OnlineMessage | null {
     if (bare.length) return null;
     if (action === 'rest' && !/^\d+$/.test(kv.minutes ?? '')) return null;
     if (action === 'settle' && !/^(player|bank|push)$/.test(kv.result ?? '')) return null;
-    if (action === 'handoff' && !/^[\d]+:[\d]+,[\d]+:[\d]+$/.test(kv.chips ?? '')) return null;
+    // 筹码允许为负(21 点自然黑杰克 1.5 倍可把庄家打成负数,设计允许负筹码);
+    // 旧正则只认非负整数,会把含负值的交接消息当聊天丢弃,导致庄家轮换永久卡死。
+    if (action === 'handoff' && !/^\d+:-?\d+,\d+:-?\d+$/.test(kv.chips ?? '')) return null;
   }
   return { action, game, tokens: bare.length ? bare : rest, kv };
 }
