@@ -54,7 +54,7 @@ describe('星邮协议客户端', () => {
     expect(call.headers.authorization).toBe(`Bearer ${IDENTITY.token}`);
     expect(call.headers['x-starpost-id']).toBe('12345');
     expect(call.body.action).toBe('snapshot');
-    expect(call.body.limits.maxMessagesPerDay).toBe(300);
+    expect(call.body.limits.maxMessagesPerDay).toBe(2000); // 联机牌局协议消息量大,配额须宽(旧值 300 会把一局德州静默掉)
   });
 
   it('ok=false 映射为 StarpostError', async () => {
