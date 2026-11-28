@@ -7,6 +7,7 @@ import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import cardFaceUrl from './assets/card-face.jpg';
 import cardBackUrl from './assets/card-back.jpg';
 import { panelText, type PanelText } from './strings.ts';
+import { HANAFUDA_SVG_DEFS, hanafudaCardSvg, hanafudaCardLabel } from './hanafuda-cards.ts';
 
 interface SeatView {
   chips: number;
@@ -52,20 +53,23 @@ interface MatchView {
 interface Snapshot {
   version: number;
   spectate?: boolean;
-  game: 'blackjack' | 'oldmaid' | 'holdem' | null;
+  game: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda' | null;
   /** 有未完对局的游戏(打开时面板弹「继续/重新开始」)。 */
-  pausedGames?: Array<'blackjack' | 'oldmaid' | 'holdem'>;
+  pausedGames?: Array<'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda'>;
   /** 各游戏自己的筹码(筹码按游戏分开计)。 */
-  gameChips?: Partial<Record<'blackjack' | 'holdem', { ai: number; player: number }>>;
+  gameChips?: Partial<Record<'blackjack' | 'holdem' | 'hanafuda', { ai: number; player: number }>>;
   ai: SeatView;
   player: SeatView;
   minBet: number;
   maxBet: number;
   startChips: number;
   dealerHitsSoft17: boolean;
+  /** 花札役分的流派值(役种表浮层用;按部署配置现算)。 */
+  hanafudaScores?: { five: number; four: number; three: number };
   matches: MatchView[];
   // ── 21 点(game==='blackjack') ──
-  phase?: 'betting' | 'insurance' | 'playerActing';
+  /** 21 点 betting/insurance/playerActing;德州 preflop…;花札 playHand/decide/over。 */
+  phase?: string;
   round?: number;
   aiRole?: 'dealer' | 'player';
   bet?: number;
@@ -115,6 +119,31 @@ interface Snapshot {
   playerAllIn?: boolean;
   lastHoldem?: HoldemRecordView | null;
   holdemHistory?: HoldemRecordView[];
+  // ── 花札(game==='hanafuda') ──
+  roundsTotal?: number;
+  matchOver?: boolean;
+  finalWinner?: 'ai' | 'player' | 'draw' | null;
+  fieldCards?: Array<{ r: number; s: number; id: number }>;
+  /** 花札玩家的手牌(名与抽鬼牌的 playerCards 文本数组区分开)。 */
+  handCards?: Array<{ r: number; s: number; id: number }>;
+  deckCount?: number;
+  aiCollect?: HanafudaCollectView;
+  playerCollect?: HanafudaCollectView;
+  aiScore?: number;
+  playerScore?: number;
+  matchScores?: { ai: number; player: number };
+  aiKoikoi?: boolean;
+  playerKoikoi?: boolean;
+  pickOwner?: 'ai' | 'player' | null;
+  newYaku?: string[];
+  hanafudaHistory?: Array<{ at: string; round: number; winner: string; aiScore: number; playerScore: number }>;
+}
+
+interface HanafudaCollectView {
+  light: string[];
+  tane: string[];
+  tan: string[];
+  kasu: string[];
 }
 
 interface HoldemRecordView {
@@ -249,7 +278,7 @@ function renderSpectate(card: HTMLElement, spec: Record<string, any>, T: PanelTe
   const head = el('div', 'online-friends-title', T.online.spectateTitle);
   card.append(head);
   if (spec.state === 'idle') { card.append(el('div', 'lobby-empty', T.online.spectateIdle)); return; }
-  const gameName = spec.game === 'blackjack' ? T.online.gameBlackjack : spec.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem;
+  const gameName = spec.game === 'blackjack' ? T.online.gameBlackjack : spec.game === 'oldmaid' ? T.online.gameOldmaid : spec.game === 'hanafuda' ? T.online.gameHanafuda : T.online.gameHoldem;
   card.append(el('div', 'spec-sub', `${gameName} · ${T.online.handsLabel} ${spec.hands ?? 0} · ${T.online.chipsMe} ${spec.chipsMe ?? '?'} / ${T.online.chipsPeer} ${spec.chipsPeer ?? '?'}`));
   if (spec.resting) card.append(el('div', 'spec-rest', T.online.restHint));
 
@@ -312,6 +341,8 @@ const ui = {
   bet: 0,
   historyOpen: false,
   rulesOpen: false,
+  /** 花札役种表浮层(与规则浮层互斥)。 */
+  yakuOpen: false,
   matchOpen: false,
   lobbyQuery: '',
   /** 空桌时主菜单停留在哪个视图;一进对局就重置回菜单(返回大厅先见模式选择)。 */
@@ -380,6 +411,20 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .rules-card ul { margin: 2px 0 2px 18px; padding: 0; }
     .rules-card li { margin: 2px 0; }
     .rules-card p { margin: 4px 0; }
+    .yaku-card { max-width: 500px; }
+    .yaku-section { color: #8a3030; }
+    .yaku-row { display: flex; gap: 10px; align-items: flex-start; margin: 6px 0; padding: 6px 8px;
+      background: rgba(0,0,0,.06); border-radius: 8px; }
+    .yaku-cards { display: flex; gap: 4px; flex: none; padding-top: 2px; }
+    .yaku-cards .hcard { width: 26px; height: 44px; }
+    .yaku-info { flex: 1 1 auto; min-width: 0; }
+    .yaku-name { display: flex; align-items: baseline; gap: 8px; }
+    .yaku-name > span:first-child { font-weight: 800; font-size: 13.5px; }
+    .yaku-pts { font-size: 11px; font-weight: 700; color: #8a3030;
+      background: rgba(138,48,48,.1); border-radius: 999px; padding: 1px 9px; }
+    .yaku-desc { font-size: 11.5px; line-height: 1.55; opacity: .85; margin-top: 2px; }
+    .yaku-note { font-size: 11.5px; opacity: .85; background: rgba(138,48,48,.07);
+      border-radius: 8px; padding: 6px 9px; }
     .rules-close { margin-top: 10px; width: 100%; padding: 8px; border-radius: 8px;
       border: 1px solid rgba(0,0,0,.25); background: #c8a44a; font-weight: 700; cursor: pointer; }
     .felt { border-radius: 16px; border: 7px solid #4a3220; background:
@@ -507,6 +552,34 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     .game-card .idx-suit { font-size: 7px; }
     .game-card .pip { font-size: 15px; }
     .lobby-cards .pcard.tilt { transform: rotate(7deg) translateY(-2px); }
+    .hcard { width: 56px; height: 93px; flex: none; position: relative; border-radius: 5px;
+      background: #14120d; box-shadow: 0 2px 5px rgba(0,0,0,.45); }
+    .hcard svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .hcard.mini { width: 33px; height: 55px; border-radius: 4px; }
+    .hcard.mini.tilt { transform: rotate(7deg) translateY(-2px); }
+    .hcard.pickable { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+    .hcard.pickable:hover { transform: translateY(-6px); box-shadow: 0 6px 12px rgba(0,0,0,.55);
+      outline: 2px solid rgba(244,239,226,.75); }
+    .hcard[data-tip] { position: relative; }
+    .hcard[data-tip]:hover::after {
+      content: attr(data-tip); position: absolute; left: 50%; transform: translateX(-50%);
+      bottom: -27px; z-index: 40; white-space: nowrap; pointer-events: none;
+      background: rgba(10,14,11,.9); color: #f4efe2; font-size: 11px; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px; box-shadow: 0 3px 8px rgba(0,0,0,.5);
+      border: 1px solid rgba(244,239,226,.35);
+    }
+    .hcard.hf-back { width: 30px; height: 50px; }
+    .hf-field { min-height: 100px; }
+    .hf-field .hcard.hf-pick { outline: 2px dashed rgba(240,210,100,.7); }
+    .hf-collect { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+      background: rgba(0,0,0,.24); border-radius: 10px; padding: 5px 10px; max-width: 480px; }
+    .hf-col { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 86px; }
+    .hf-col-label { font-size: 10px; opacity: .65; letter-spacing: 2px; }
+    .hf-col-empty { font-size: 10px; opacity: .35; }
+    .hf-chip { font-size: 11px; line-height: 1.5; background: rgba(0,0,0,.25); border-radius: 999px;
+      padding: 1px 8px; white-space: nowrap; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+    .hf-yaku { margin-top: 4px; font-size: 12px; color: #f0d264; }
+    .hanafuda { gap: 10px; }
     .game-info { flex: 1 1 auto; min-width: 0; }
     .game-name { font-size: 15px; font-weight: 800; letter-spacing: 1px; display: flex;
       align-items: baseline; gap: 7px; }
@@ -591,17 +664,30 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
   const gameLabel = state.game === 'blackjack' ? (state.aiRole === 'dealer' ? T.roleText.aiDealer : T.roleText.meDealer)
     : state.game === 'oldmaid' ? T.gamePicker.oldmaidTitle
       : state.game === 'holdem' ? `${T.gamePicker.holdemTitle} · ${T.holdem.blindsLabel(state.blinds?.sb ?? 0, state.blinds?.bb ?? 0)}`
-        : T.roleText.noGame;
-  topbar.append(el('span', 'casino-round', `${gameLabel}${state.game === 'holdem' ? '' : ` · ${softLabel}`}`));
+        : state.game === 'hanafuda' ? `${T.gamePicker.hanafudaTitle} · ${T.hanafuda.roundLabel(state.round ?? 0, state.roundsTotal ?? 3)}`
+          : T.roleText.noGame;
+  topbar.append(el('span', 'casino-round', `${gameLabel}${state.game === 'holdem' || state.game === 'hanafuda' ? '' : ` · ${softLabel}`}`));
   // 「规则说明」只在对局中提供——大厅还没有游戏,规则无从谈起,不占右上角。
   if (state.game !== null) {
     const rulesBtn = el('button', 'rules-btn', ui.rulesOpen ? T.rulesClose : T.rulesBtn);
     rulesBtn.type = 'button';
     rulesBtn.addEventListener('click', () => {
       ui.rulesOpen = !ui.rulesOpen;
+      if (ui.rulesOpen) ui.yakuOpen = false;
       if (current) render(ctx, current);
     }, { signal: ctx.signal });
     topbar.append(rulesBtn);
+    // 花札对局:规则旁加「役种表」——图文对照全部役种,方便不熟花札的玩家随时查阅。
+    if (state.game === 'hanafuda') {
+      const yakuBtn = el('button', 'rules-btn', ui.yakuOpen ? T.yakuClose : T.yakuBtn);
+      yakuBtn.type = 'button';
+      yakuBtn.addEventListener('click', () => {
+        ui.yakuOpen = !ui.yakuOpen;
+        if (ui.yakuOpen) ui.rulesOpen = false;
+        if (current) render(ctx, current);
+      }, { signal: ctx.signal });
+      topbar.append(yakuBtn);
+    }
   }
   wrap.append(topbar);
 
@@ -609,11 +695,12 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     // 观战横幅是持久元素:每次 1s 重渲染后重新贴回同一节点(退出按钮常驻可点,不随牌桌重建)。
     if (!spectateBarEl) {
       const bar = el('div', 'spectate-bar');
-      bar.append(el('span', 'spectate-title', T.online.spectateTitle + ' · ' + (state.game === 'blackjack' ? T.online.gameBlackjack : state.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem)));
+      bar.append(el('span', 'spectate-title', T.online.spectateTitle + ' · ' + (state.game === 'blackjack' ? T.online.gameBlackjack : state.game === 'oldmaid' ? T.online.gameOldmaid : state.game === 'hanafuda' ? T.online.gameHanafuda : T.online.gameHoldem)));
       const exit = el('button', 'online-stop', T.online.spectateExit);
       exit.type = 'button';
       exit.addEventListener('click', () => {
         ui.spectate = false;
+        ui.lobbyMode = 'online'; // 退出观战回联机页(好友列表),不是本地牌桌
         lastSpectateJson = '';
         spectateBarEl?.remove();
         spectateBarEl = null;
@@ -625,7 +712,8 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     wrap.prepend(spectateBarEl);
   }
   // ── 空桌:主菜单(本地模式 / 联机模式) → 本地模式里是游戏大厅 ──
-  if (state.game !== null && !state.spectate) ui.lobbyMode = 'menu';
+  // 进本地对局即重置回菜单;观战退出豁免(它要回联机页而不是被重置到菜单)。
+  if (state.game !== null && !state.spectate && ui.lobbyMode !== 'online') ui.lobbyMode = 'menu';
   if (ui.lobbyMode !== 'online' && ui.onlineTimer !== null) { clearInterval(ui.onlineTimer); ui.onlineTimer = null; }
   if (state.game === null) {
     const felt = el('div', 'felt lobby');
@@ -700,7 +788,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         const card = el('div', 'rules-card');
         card.append(el('h4', undefined, `${T.online.inviteTitle} · ${nick}`));
         const gRow = el('div', 'btnrow online-game-row');
-        for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem]] as const) {
+        for (const [g, label] of [['blackjack', T.online.gameBlackjack], ['oldmaid', T.online.gameOldmaid], ['holdem', T.online.gameHoldem], ['hanafuda', T.online.gameHanafuda]] as const) {
           const gb = el('button', 'primary', label);
           gb.type = 'button';
           gb.addEventListener('click', async () => {
@@ -762,7 +850,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         statusCard.append(el('div', 'online-status-line', `${T.online.selfId} ${data.myBotId ?? data.botId ?? T.online.unknown}`));
         if (data.status !== 'idle' && data.session) {
           const sess = data.session;
-          const gameName = sess.game === 'blackjack' ? T.online.gameBlackjack : sess.game === 'oldmaid' ? T.online.gameOldmaid : T.online.gameHoldem;
+          const gameName = sess.game === 'blackjack' ? T.online.gameBlackjack : sess.game === 'oldmaid' ? T.online.gameOldmaid : sess.game === 'hanafuda' ? T.online.gameHanafuda : T.online.gameHoldem;
           statusCard.append(el('div', 'online-status-line', `${T.online.vsLabel} ${sess.peer} · ${gameName}`));
           statusCard.append(el('div', 'online-status-line', `${T.online.handsLabel} ${sess.hands} · ${T.online.chipsMe} ${sess.chipsMe ?? '?'} · ${T.online.chipsPeer} ${sess.chipsPeer ?? '?'}`));
           statusCard.append(el('div', 'online-status-line', sess.iAmBank ? T.online.youAreBank : T.online.peerIsBank));
@@ -788,8 +876,9 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
         // 右栏:观战模式显示牌局实况;否则好友列表(黄/绿/灰点,在线优先)。
         if (ui.spectate) {
           if (data.status === 'idle') {
-            // AI 退出对局/会话结束:自动离开观战,回到联机大厅(主人要求)。
+            // AI 退出对局/会话结束:自动离开观战,回到联机页好友列表(与横幅退出同路径)。
             ui.spectate = false;
+            ui.lobbyMode = 'online';
             lastSpectateJson = '';
             spectateBarEl?.remove();
             spectateBarEl = null;
@@ -881,13 +970,14 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     const paused = state.pausedGames ?? [];
 
     /** 打开某游戏:有挂起的未完对局时先弹「继续/重新开始」确认框,否则直接开局。 */
-    function openGame(game: 'blackjack' | 'oldmaid' | 'holdem', dealer?: 'ai' | 'player'): void {
+    function openGame(game: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda', dealer?: 'ai' | 'player'): void {
       if (!paused.includes(game)) {
         void send(ctx, T, 'newgame', dealer ? { game, dealer } : { game });
         return;
       }
       const title = game === 'blackjack' ? T.gamePicker.blackjackTitle
-        : game === 'oldmaid' ? T.gamePicker.oldmaidTitle : T.gamePicker.holdemTitle;
+        : game === 'oldmaid' ? T.gamePicker.oldmaidTitle
+          : game === 'hanafuda' ? T.gamePicker.hanafudaTitle : T.gamePicker.holdemTitle;
       const overlay = el('div', 'rules-overlay');
       const card = el('div', 'rules-card');
       card.append(el('h4', undefined, `${title} · ${T.gamePicker.resumeTitle}`));
@@ -983,6 +1073,33 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     heCard.append(heInfo);
     list.append(heCard);
     lobbyEntries.push({ el: heCard, kw: T.gamePicker.holdemKw });
+
+    // 花札卡:三张 SVG 花札牌装饰(松鹤/樱幕/芒月——三张光牌点题)
+    const hfCard = el('div', 'game-card');
+    const hfRow = el('div', 'cards lobby-cards');
+    for (const [r, s] of [[1, 0], [3, 0], [8, 0]] as Array<[number, number]>) {
+      const mini = el('div', 'hcard mini');
+      mini.innerHTML = hanafudaCardSvg(r, s);
+      if (r === 8) mini.classList.add('tilt');
+      hfRow.append(mini);
+    }
+    hfCard.append(hfRow);
+    const hfInfo = el('div', 'game-info');
+    const hfName = el('div', 'game-name');
+    hfName.append(el('span', undefined, T.gamePicker.hanafudaTitle), el('span', 'game-tag', T.gamePicker.hanafudaTag));
+    if (paused.includes('hanafuda')) hfName.append(el('span', 'game-tag paused', T.gamePicker.pausedTag));
+    hfInfo.append(hfName, el('div', 'game-desc', T.gamePicker.hanafudaDesc));
+    const hfChips = state.gameChips?.hanafuda;
+    if (hfChips) hfInfo.append(el('div', 'game-chips', T.gamePicker.chipsLine(hfChips.ai, hfChips.player)));
+    const hfBtns = el('div', 'btnrow');
+    const hfBtn = el('button', 'primary', T.gamePicker.hanafudaStart);
+    hfBtn.type = 'button';
+    hfBtn.addEventListener('click', () => openGame('hanafuda'), { signal: ctx.signal });
+    hfBtns.append(hfBtn);
+    hfInfo.append(hfBtns);
+    hfCard.append(hfInfo);
+    list.append(hfCard);
+    lobbyEntries.push({ el: hfCard, kw: T.gamePicker.hanafudaKw });
 
     /** 按当前搜索词显隐卡片;全部被滤掉时给一条空提示。 */
     function applyLobbyFilter(): void {
@@ -1595,6 +1712,198 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
     wrap.append(omHistory);
   }
 
+  // ── 花札桌面 ──
+  if (state.game === 'hanafuda') {
+    // SVG defs 全文档注入一次;面板重渲染不会重复。
+    if (!document.getElementById('hanafuda-svg-defs')) {
+      const defsHost = document.createElement('div');
+      defsHost.id = 'hanafuda-svg-defs';
+      defsHost.style.display = 'none';
+      defsHost.innerHTML = HANAFUDA_SVG_DEFS;
+      document.body.append(defsHost);
+    }
+    const hfTurnOwner = state.turnOwner ?? 'player';
+    const hfPickOwner = state.pickOwner ?? null;
+    const hfEnded = state.matchOver === true;
+    const hfPlayerCanPlay = !hfEnded && hfTurnOwner === 'player' && state.phase === 'playHand' && !hfPickOwner;
+
+    /** 一张花札牌面(SVG)。canPlay = 玩家可点(出手牌或选场牌);悬停显示牌名与类别。 */
+    function hanaEl(card: { r: number; s: number; id: number }, canPlay: boolean, onPlay?: () => void): HTMLElement {
+      const d = el('div', 'hcard' + (canPlay ? ' pickable' : ''));
+      d.setAttribute('data-tip', hanafudaCardLabel(card.r, card.s));
+      d.innerHTML = hanafudaCardSvg(card.r, card.s, card.id);
+      if (canPlay && onPlay) d.addEventListener('click', onPlay, { signal: ctx.signal });
+      return d;
+    }
+    /** 收集区缩略:四列小牌。 */
+    function collectEl(view: HanafudaCollectView): HTMLElement {
+      const box = el('div', 'hf-collect');
+      const groups: Array<[string, string[]]> = [['光', view.light], ['种', view.tane], ['短', view.tan], ['粕', view.kasu]];
+      for (const [label, cards] of groups) {
+        const col = el('div', 'hf-col');
+        col.append(el('span', 'hf-col-label', label));
+        for (const name of cards) col.append(el('span', 'hf-chip', name));
+        if (!cards.length) col.append(el('span', 'hf-col-empty', '—'));
+        box.append(col);
+      }
+      return box;
+    }
+
+    const felt = el('div', 'felt hanafuda');
+    wrap.append(felt);
+
+    // 对方席:手牌背面 + 收集区
+    const aiSeat = el('div', 'seat');
+    const aiHead = el('div', 'seat-head');
+    aiHead.append(el('span', undefined, T.ai), el('span', 'total-pill', T.hanafuda.collectLabel(state.aiCollect?.light.length ?? 0, state.aiCollect?.tane.length ?? 0, state.aiCollect?.tan.length ?? 0, state.aiCollect?.kasu.length ?? 0)));
+    aiSeat.append(aiHead);
+    const aiBacks = el('div', 'cards');
+    for (let i = 0; i < (state.aiHandCount ?? 0); i++) {
+      const back = cardEl('', true);
+      back.classList.add('hf-back');
+      aiBacks.append(back);
+    }
+    aiSeat.append(aiBacks);
+    const aiCollectRow = el('div', 'hf-collect');
+    const aiGroups: Array<[string, string[]]> = [['光', state.aiCollect?.light ?? []], ['种', state.aiCollect?.tane ?? []], ['短', state.aiCollect?.tan ?? []], ['粕', state.aiCollect?.kasu ?? []]];
+    for (const [label, cards] of aiGroups) {
+      const col = el('div', 'hf-col');
+      col.append(el('span', 'hf-col-label', label));
+      for (const name of cards) {
+        const chip = el('span', 'hf-chip', name);
+        chip.title = name;
+        col.append(chip);
+      }
+      if (!cards.length) col.append(el('span', 'hf-col-empty', '—'));
+      aiCollectRow.append(col);
+    }
+    aiSeat.append(aiCollectRow);
+    felt.append(aiSeat);
+
+    // 中央:役分横幅 + 场牌 + 山札
+    const pot = el('div', 'pot');
+    const potInner = el('div', 'pot-inner');
+    potInner.append(el('div', 'pot-num', T.hanafuda.scoreLabel(state.aiScore ?? 0, state.playerScore ?? 0)));
+    potInner.append(el('div', undefined, T.hanafuda.matchLabel(state.matchScores?.ai ?? 0, state.matchScores?.player ?? 0) + ' · ' + T.hanafuda.deckLabel(state.deckCount ?? 0)));
+    if ((state.newYaku ?? []).length) potInner.append(el('div', 'hf-yaku', T.hanafuda.yakuBanner((state.newYaku ?? []).join(' · '))));
+    pot.append(potInner);
+    felt.append(pot);
+
+    const fieldRow = el('div', 'cards hf-field');
+    const pickable = hfPickOwner === 'player';
+    for (const card of state.fieldCards ?? []) {
+      const node = hanaEl(card, pickable, () => void send(ctx, T, 'hanafudaPick', { index: (state.fieldCards ?? []).indexOf(card) }));
+      if (pickable) node.classList.add('hf-pick');
+      fieldRow.append(node);
+    }
+    felt.append(fieldRow);
+    if (hfPickOwner === 'player') {
+      const pickBanner = el('div', 'banner wait');
+      pickBanner.append(el('span', 'banner-text', T.hanafuda.pickPrompt));
+      felt.append(pickBanner);
+    }
+
+    // 你的席:收集区 + 手牌(明牌,可点打出)
+    const playerSeat = el('div', 'seat');
+    const playerCollectRow = el('div', 'hf-collect');
+    const playerGroups: Array<[string, string[]]> = [['光', state.playerCollect?.light ?? []], ['种', state.playerCollect?.tane ?? []], ['短', state.playerCollect?.tan ?? []], ['粕', state.playerCollect?.kasu ?? []]];
+    for (const [label, cards] of playerGroups) {
+      const col = el('div', 'hf-col');
+      col.append(el('span', 'hf-col-label', label));
+      for (const name of cards) {
+        const chip = el('span', 'hf-chip', name);
+        chip.title = name;
+        col.append(chip);
+      }
+      if (!cards.length) col.append(el('span', 'hf-col-empty', '—'));
+      playerCollectRow.append(col);
+    }
+    playerSeat.append(playerCollectRow);
+    const playerRow = el('div', 'cards');
+    const playerCardsView = state.handCards ?? [];
+    playerCardsView.forEach((card, i) => {
+      playerRow.append(hanaEl(card, hfPlayerCanPlay, () => void send(ctx, T, 'hanafudaPlay', { index: i })));
+    });
+    if (!hfEnded && (state.handCards ?? []).length === 0) playerRow.append(el('div', 'casino-idle', '—'));
+    playerSeat.append(playerRow);
+    const playerHead = el('div', 'seat-head');
+    playerHead.append(el('span', undefined, T.me), el('span', 'total-pill', T.hanafuda.scoreLabel(state.playerScore ?? 0, state.aiScore ?? 0)));
+    playerSeat.append(playerHead);
+    felt.append(playerSeat);
+    wrap.append(felt);
+
+    // ── 决策:こいこい / 收手 ──
+    if (!hfEnded && state.phase === 'decide' && hfTurnOwner === 'player') {
+      const row = el('div', 'btnrow');
+      const koikoi = el('button', 'primary', T.hanafuda.koikoiBtn);
+      koikoi.type = 'button';
+      koikoi.addEventListener('click', () => void send(ctx, T, 'hanafudaKoikoi'), { signal: ctx.signal });
+      const stop = el('button', 'danger', T.hanafuda.stopBtn);
+      stop.type = 'button';
+      stop.addEventListener('click', () => void send(ctx, T, 'hanafudaStop'), { signal: ctx.signal });
+      row.append(koikoi, stop);
+      wrap.append(row);
+    } else if (!hfEnded && hfPickOwner === 'player') {
+      // pick 提示已在场牌下方;此占位避免空操作区
+    } else if (!hfEnded && hfTurnOwner === 'ai') {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', state.phase === 'decide' ? T.hanafuda.aiTurn : T.hanafuda.aiTurn));
+      wrap.append(banner2);
+    } else if (!hfEnded && hfPlayerCanPlay) {
+      const banner2 = el('div', 'banner wait');
+      banner2.append(el('span', 'banner-text', T.hanafuda.yourTurn));
+      wrap.append(banner2);
+    }
+
+    // ── 终局横幅 + 再来一场 ──
+    if (hfEnded) {
+      const bannerBox = el('div');
+      wrap.append(bannerBox);
+      const ai = state.matchScores?.ai ?? 0;
+      const p = state.matchScores?.player ?? 0;
+      const win = (state.finalWinner ?? 'draw') === 'player';
+      const tie = (state.finalWinner ?? 'draw') === 'draw';
+      const banner = el('div', `banner ${tie ? 'push' : win ? 'win' : 'lose'}`);
+      banner.append(el('span', 'banner-text', tie ? T.hanafuda.tieBanner(ai, p) : win ? T.hanafuda.winBanner(p, ai) : T.hanafuda.loseBanner(ai, p)));
+      bannerBox.append(banner);
+      const row = el('div', 'btnrow');
+      const again = el('button', 'primary', T.hanafuda.againBtn);
+      again.type = 'button';
+      again.addEventListener('click', () => void send(ctx, T, 'againHanafuda'), { signal: ctx.signal });
+      const back = el('button', undefined, T.oldmaid.backLobbyBtn);
+      back.type = 'button';
+      back.addEventListener('click', () => void send(ctx, T, 'leave'), { signal: ctx.signal });
+      row.append(again, back);
+      bannerBox.append(row);
+    }
+
+    // ── 局历史 ──
+    const hfHistory = el('div', 'history');
+    const hfRecords = state.hanafudaHistory ?? [];
+    const hfToggle = el('button', 'history-toggle', T.matchToggle(ui.matchOpen, hfRecords.length));
+    hfToggle.type = 'button';
+    hfToggle.addEventListener('click', () => {
+      ui.matchOpen = !ui.matchOpen;
+      hfToggle.textContent = T.matchToggle(ui.matchOpen, hfRecords.length);
+      hfList.classList.toggle('hidden', !ui.matchOpen);
+    }, { signal: ctx.signal });
+    hfHistory.append(hfToggle);
+    const hfList = el('div');
+    hfList.classList.toggle('hidden', !ui.matchOpen);
+    hfRecords.forEach((record) => {
+      const line = el('div', 'history-line');
+      const when = (record.at || '').slice(5, 16).replace('T', ' ');
+      const winnerText = record.winner === 'player' ? T.hanafuda.winnerYou
+        : record.winner === 'ai' ? T.hanafuda.winnerOpp : T.hanafuda.winnerDraw;
+      line.append(el('span', undefined, T.hanafuda.historyLine(when, record.round, winnerText, record.aiScore, record.playerScore)));
+      const pill = outcomePill(T, record.winner === 'player' ? 'win' : record.winner === 'ai' ? 'lose' : 'push');
+      line.append(pill);
+      hfList.append(line);
+    });
+    hfHistory.append(hfList);
+    wrap.append(hfHistory);
+  }
+
   // ── 21 点手历史 ──
   if (state.game === 'blackjack') {
     const history = el('div', 'history');
@@ -1653,10 +1962,19 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
 
   // ── 规则浮层(仅对局中;回大厅即收起;Esc 可关) ──
   if (state.game === null) ui.rulesOpen = false;
+  if (state.game === null || state.game !== 'hanafuda') ui.yakuOpen = false;
   if (ui.rulesOpen) {
     wrap.append(buildRules(ctx, T, state.game));
     bindEsc(() => {
       ui.rulesOpen = false;
+      if (current) render(ctx, current);
+    });
+  }
+  // ── 花札役种表浮层(与规则浮层互斥;Esc 可关) ──
+  if (ui.yakuOpen && state.game === 'hanafuda') {
+    wrap.append(buildYaku(ctx, T, state.hanafudaScores));
+    bindEsc(() => {
+      ui.yakuOpen = false;
       if (current) render(ctx, current);
     });
   }
@@ -1666,7 +1984,7 @@ function render(ctx: WebUiPanelContext, state: Snapshot): void {
 }
 
 /** 规则说明浮层:右上角按钮展开;内容随桌面当前游戏切换,空桌时所有游戏的规则都给(按浏览器语言)。 */
-function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'oldmaid' | 'holdem' | null): HTMLElement {
+function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda' | null): HTMLElement {
   const overlay = el('div', 'rules-overlay');
   const card = el('div', 'rules-card');
   const tpl = document.createElement('template');
@@ -1674,14 +1992,86 @@ function buildRules(ctx: WebUiPanelContext, T: PanelText, game: 'blackjack' | 'o
     ? T.rulesOldmaidHtml
     : game === 'holdem'
       ? T.rulesHoldemHtml
+      : game === 'hanafuda'
+        ? T.rulesHanafudaHtml
         : game === 'blackjack'
       ? T.rulesBlackjackHtml
-      : `${T.rulesBlackjackHtml}\n${T.rulesOldmaidHtml}\n${T.rulesHoldemHtml}`;
+      : `${T.rulesBlackjackHtml}\n${T.rulesOldmaidHtml}\n${T.rulesHoldemHtml}\n${T.rulesHanafudaHtml}`;
   card.append(tpl.content.cloneNode(true));
   const close = el('button', 'rules-close', T.rulesCloseBtn);
   close.type = 'button';
   close.addEventListener('click', () => {
     ui.rulesOpen = false;
+    if (current) render(ctx, current);
+  }, { signal: ctx.signal });
+  card.append(close);
+  overlay.append(card);
+  return overlay;
+}
+
+/** 花札役种表(图文对照):组成牌用 SVG 牌面小图;光系分值随部署配置(fudawiki/Nintendo)显示。 */
+function buildYaku(ctx: WebUiPanelContext, T: PanelText, scores?: { five: number; four: number; three: number }): HTMLElement {
+  const overlay = el('div', 'rules-overlay');
+  const card = el('div', 'rules-card yaku-card');
+  card.append(el('h4', undefined, T.yakuTitle));
+  card.append(el('p', 'yaku-note', T.yakuNote));
+  const five = scores?.five ?? 15;
+  const four = scores?.four ?? 8;
+  const three = scores?.three ?? 6;
+  type Row = { key: string; name: string; pts: string; cards: Array<[number, number]>; note: string };
+  const rows: Array<{ section: string; rows: Row[] }> = [
+    {
+      section: T.yakuSectionLight,
+      rows: [
+        { key: 'goko', name: '五光', pts: T.yakuPoints(five), cards: [[1, 0], [3, 0], [8, 0], [11, 0], [12, 0]], note: T.yakuGoko },
+        { key: 'ameShiko', name: '雨四光', pts: T.yakuPoints(8), cards: [[11, 0], [1, 0], [3, 0], [8, 0]], note: T.yakuAmeShiko },
+        { key: 'shiko', name: '四光', pts: T.yakuPoints(four), cards: [[1, 0], [3, 0], [8, 0], [12, 0]], note: T.yakuShiko },
+        { key: 'sanko', name: '三光', pts: T.yakuPoints(three), cards: [[1, 0], [3, 0], [8, 0]], note: T.yakuSanko },
+      ],
+    },
+    {
+      section: T.yakuSectionKind,
+      rows: [
+        { key: 'inoshikacho', name: '猪鹿蝶', pts: T.yakuBonus(5, T.yakuPerKind), cards: [[7, 1], [10, 1], [6, 1]], note: T.yakuIno },
+        { key: 'akatan', name: '赤短', pts: T.yakuBonus(5, T.yakuPerTan), cards: [[1, 3], [2, 3], [3, 3]], note: T.yakuAka },
+        { key: 'aotan', name: '青短', pts: T.yakuBonus(5, T.yakuPerTan), cards: [[6, 3], [9, 3], [10, 3]], note: T.yakuAo },
+        { key: 'hanamiZake', name: '花见酒', pts: T.yakuPoints(5), cards: [[3, 0], [9, 1]], note: T.yakuHanami },
+        { key: 'tsukimiZake', name: '月见酒', pts: T.yakuPoints(5), cards: [[8, 0], [9, 1]], note: T.yakuTsukimi },
+      ],
+    },
+    {
+      section: T.yakuSectionCount,
+      rows: [
+        { key: 'tan', name: '短册', pts: T.yakuBonus(1, T.yakuPerTan), cards: [[4, 3], [5, 3], [7, 3], [11, 3]], note: T.yakuTan },
+        { key: 'tane', name: '种', pts: T.yakuBonus(1, T.yakuPerKind), cards: [[2, 1], [8, 1], [9, 1], [11, 1]], note: T.yakuTane },
+        { key: 'kasu', name: '粕', pts: T.yakuBonus(1, T.yakuPerKasu), cards: [[1, 2], [4, 2], [9, 2], [12, 2]], note: T.yakuKasu },
+      ],
+    },
+  ];
+  for (const group of rows) {
+    card.append(el('h4', 'yaku-section', group.section));
+    for (const row of group.rows) {
+      const line = el('div', 'yaku-row');
+      const pics = el('div', 'yaku-cards');
+      for (const [r, s] of row.cards) {
+        const mini = el('div', 'hcard mini');
+        mini.innerHTML = hanafudaCardSvg(r, s);
+        mini.setAttribute('data-tip', hanafudaCardLabel(r, s));
+        pics.append(mini);
+      }
+      line.append(pics);
+      const info = el('div', 'yaku-info');
+      const name = el('div', 'yaku-name');
+      name.append(el('span', undefined, row.name), el('span', 'yaku-pts', row.pts));
+      info.append(name, el('div', 'yaku-desc', row.note));
+      line.append(info);
+      card.append(line);
+    }
+  }
+  const close = el('button', 'rules-close', T.yakuClose);
+  close.type = 'button';
+  close.addEventListener('click', () => {
+    ui.yakuOpen = false;
     if (current) render(ctx, current);
   }, { signal: ctx.signal });
   card.append(close);

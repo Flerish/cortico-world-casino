@@ -163,6 +163,10 @@ describe('牌桌 × 星邮集成', () => {
     expect(parseOnlineMessage('@casino invite blackjack')).toMatchObject({ action: 'invite', game: 'blackjack' });
     expect(parseOnlineMessage('@casino accept')).toMatchObject({ action: 'accept', game: null });
     expect(parseOnlineMessage('@casino decline holdem')).toMatchObject({ action: 'decline', game: 'holdem' });
+    expect(parseOnlineMessage('@casino ping')).toMatchObject({ action: 'ping' });
+    expect(parseOnlineMessage('@casino pong')).toMatchObject({ action: 'pong' });
+    expect(parseOnlineMessage('@casino ping ingame=1')).toMatchObject({ action: 'ping', kv: { ingame: '1' } });
+    expect(parseOnlineMessage('@casino ping hello')).toBeNull();
     expect(parseOnlineMessage('@casino')).toBeNull();
     expect(parseOnlineMessage('@casino invite poker')).toBeNull();
     expect(parseOnlineMessage('@casino hack')).toBeNull();
@@ -480,6 +484,94 @@ describe('双 world 联机对局(主机权威)', () => {
     expect(guestFake.events.some((e) => e.type === 'casino.online_session' && e.text.includes('结束'))).toBe(true);
     const guestState = await tool(guest, { action: 'state' });
     expect(guestState.state).toBe('idle');
+    await host.stop();
+    await guest.stop();
+  });
+
+  it('在线心跳:互 ping 后好友双双在线且静默;ping 不当会话消息(不续命僵尸会话)', async () => {
+    const host = onlineWorld('31477');
+    const guest = onlineWorld('31489');
+    const hostFake = new FakeHost();
+    const guestFake = new FakeHost();
+    await host.start(hostFake);
+    await guest.start(guestFake);
+    await wait();
+    // 双方互发 ping(模拟 presenceTick 的心跳广播)
+    net.deliver('31477', '31489', '@casino ping');
+    net.deliver('31489', '31477', '@casino ping');
+    await poll(host); await wait();
+    await poll(guest); await wait();
+    // pong 回应 + 对端 ping 都会更新 activity(好友列表的 online 即由它推断;假网络无 profiles,直接验 activity)
+    const activityOf = (w: CasinoWorld) => (w as unknown as { starpost: { activity: Record<string, number> } }).starpost.activity;
+    expect(Number(activityOf(host)['31489'] ?? 0)).toBeGreaterThan(0);
+    expect(Number(activityOf(guest)['31477'] ?? 0)).toBeGreaterThan(0);
+    // 客座收到 ping 后静默回了 pong(保活发起方)
+    const queues = (net as unknown as { queues: Map<string, Array<{ text: string }>> }).queues;
+    expect((queues.get('31477') ?? []).some((m) => m.text.startsWith('@casino pong'))).toBe(true);
+    // 静默:ping/pong 不推给 AI,也不产生消息事件
+    expect(hostFake.events.filter((e) => e.type === 'casino.starpost_message').length).toBe(0);
+    expect(guestFake.events.filter((e) => e.type === 'casino.starpost_message').length).toBe(0);
+
+    // ping 不当会话消息:开局后 guest 发 ping,host 的会话 lastIncomingAt 不被续命
+    await tool(host, { action: 'invite', target: '31489', game: 'blackjack' });
+    await poll(guest); await wait();
+    await tool(guest, { action: 'accept', target: '31477' });
+    await poll(host); await wait();
+    await poll(guest); await wait();
+    const hostSt = host as unknown as { starpost: { session: { lastIncomingAt: number; peer: string } | null } };
+    expect(hostSt.starpost.session).not.toBeNull();
+    const before = hostSt.starpost.session!.lastIncomingAt;
+    net.deliver('31489', '31477', '@casino ping');
+    await poll(host); await wait();
+    expect(hostSt.starpost.session!.lastIncomingAt).toBe(before); // 心跳不续命
+    // 真实协议消息则续命
+    await wait(5); // 隔开毫秒时间戳,保证可比
+    net.deliver('31477', '31489', '@casino act bet 10'); // 客座发给庄家
+    await poll(host); await wait();
+    expect(hostSt.starpost.session!.lastIncomingAt).toBeGreaterThan(before);
+    await host.stop();
+    await guest.stop();
+  });
+
+  it('花札全流程:邀约→接受→开局→打牌→推进→收手结算→轮庄', async () => {
+    const host = onlineWorld('21477');
+    const guest = onlineWorld('21489');
+    const hostFake = new FakeHost();
+    const guestFake = new FakeHost();
+    await host.start(hostFake);
+    await guest.start(guestFake);
+    await wait();
+
+    const inv = await tool(host, { action: 'invite', target: '21489', game: 'hanafuda' });
+    expect(inv.sent).toBe(true);
+    await poll(guest); await wait();
+    const acc = await tool(guest, { action: 'accept', target: '21477' });
+    expect(acc.accepted).toBe(true);
+    await poll(host); await wait();
+    expect(hostFake.events.some((e) => e.type === 'casino.online_accepted' && e.text.includes('21489'))).toBe(true);
+    // 庄家开局:自动推进(庄家若先手会自动打)——客座收到开局 hand/state 事件
+    await poll(guest); await wait();
+    expect(guestFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札'))).toBe(true);
+
+    // 客座照事件提示打牌(打 yourHand 第 0 张)→ 庄家推进 → 客座收到新局面
+    const play = await tool(guest, { action: 'act', act: 'play', index: 0 });
+    expect(play.sent === true || play.applied === true).toBe(true);
+    await poll(host); await wait();
+    expect(hostFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札局面更新'))).toBe(true);
+    await poll(guest); await wait();
+    expect(guestFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札局面'))).toBe(true);
+
+    // 非法 index 被庄家拒绝(reject 通道)
+    const bad = await tool(guest, { action: 'act', act: 'play', index: 99 });
+    expect(bad.sent).toBe(true);
+    await poll(host); await wait();
+    expect(hostFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('被拒'))).toBe(true);
+
+    // 主机 stop → 双方收束(花札局未打完即挂起终止,与既有语义一致)
+    const stopped = await tool(host, { action: 'stop' });
+    expect(stopped.stopped).toBe(true);
+    await poll(guest); await wait();
+    expect(guestFake.events.some((e) => e.type === 'casino.online_session' && e.text.includes('结束'))).toBe(true);
     await host.stop();
     await guest.stop();
   });

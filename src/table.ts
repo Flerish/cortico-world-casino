@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import type { Card } from './cards.ts';
 import { formatCard } from './cards.ts';
+import type { HanaCard } from './hanafuda.ts';
 
 /** 庄闲角色(21 点);AI 与玩家各执一个,互为对家。庄家是机械的银行,按固定规则自动打。 */
 export type Role = 'dealer' | 'player';
@@ -151,22 +152,84 @@ export interface HoldemRecord {
   playerMade?: string;
 }
 
+/** 花札一方的收集区(按四类分列;菊上杯 9♥ 在引擎里同时计入种与粕)。 */
+export interface HanafudaCollect {
+  light: HanaCard[];
+  tane: HanaCard[];
+  tan: HanaCard[];
+  kasu: HanaCard[];
+}
+
+export interface HanafudaRecord {
+  at: string;
+  round: number;
+  winner: 'ai' | 'player' | 'draw';
+  /** 本局文数(收手者的役分,含翻倍);流局双方 0。 */
+  aiScore: number;
+  playerScore: number;
+  /** 本局谁喊过こいこい(对方收手时触发翻倍)。 */
+  koikoiBy: 'ai' | 'player' | null;
+}
+
+/** 花札(こいこい)对局状态;null = 桌上没有花札对局。 */
+export interface HanafudaState {
+  /** idle = 已选花札待发牌;playHand = 轮到 turnOwner 打手牌;decide = 成役后等收手/继续;over = 整场结束(牌留桌上)。 */
+  phase: 'idle' | 'playHand' | 'decide' | 'over';
+  round: number;
+  /** 本局先手(每局轮换)。 */
+  firstMover: 'ai' | 'player';
+  turnOwner: 'ai' | 'player';
+  aiHand: HanaCard[];
+  playerHand: HanaCard[];
+  /** 场牌(公共明牌;同月叠摞表现为同月多张,3 张成摞可整摞收)。 */
+  field: HanaCard[];
+  /** 山札(剩余牌堆)。 */
+  deck: HanaCard[];
+  aiCollect: HanafudaCollect;
+  playerCollect: HanafudaCollect;
+  /** 双方本局实时役分(公开信息,面板与回执都展示)。 */
+  aiScore: number;
+  playerScore: number;
+  /** 整场累计文(每局结算后累加;终局按它比总分)。 */
+  matchScores: { ai: number; player: number };
+  /** 当前行动方回合开始时的役分(回合末对比判定"新增/增分"→ こいこい 决策)。 */
+  turnStartScore: number;
+  aiKoikoi: boolean;
+  playerKoikoi: boolean;
+  /** 本局胜者;draw = 流局;null = 进行中。 */
+  winner: 'ai' | 'player' | 'draw' | null;
+  /** 整场(配置局数)打完;over 阶段牌面留桌,可再来一局。 */
+  matchOver: boolean;
+  finalWinner: 'ai' | 'player' | 'draw' | null;
+  /** 场牌同月 2 张时等待选收哪一张的决策方(出手牌或翻山札都可能触发)。 */
+  pickOwner: 'ai' | 'player' | null;
+  pickCards: HanaCard[];
+  /** 进入 pick 前打出/翻出的那张牌(pick 完成时与所选场牌一起收走)。 */
+  pendingCard: HanaCard | null;
+  /** pick 完成后还要不要翻山札(true = 打出手牌触发的选择,选完继续翻牌)。 */
+  pendingDraw: boolean;
+  /** 成役提示(最近一次役变化的新增役名,面板横幅与回执用)。 */
+  newYaku: string[];
+  history: HanafudaRecord[];
+}
+
 export interface TableState {
   /** 每次写盘 +1;面板据此丢弃旧帧。 */
   version: number;
   /** 当前对局类型;null = 空桌等选游戏。 */
-  game: 'blackjack' | 'oldmaid' | 'holdem' | null;
+  game: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda' | null;
   blackjack: BlackjackState | null;
   oldmaid: OldMaidState | null;
   holdem: HoldemState | null;
+  hanafuda: HanafudaState | null;
   ai: SeatState;
   player: SeatState;
   shoe: Card[];
   drawn: number;
   /** 每个游戏独立的座位(筹码+战绩,互不干涉);ai/player 是当前活动局的实时副本。 */
-  gameSeats: Partial<Record<'blackjack' | 'oldmaid' | 'holdem', { ai: SeatState; player: SeatState }>>;
+  gameSeats: Partial<Record<'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda', { ai: SeatState; player: SeatState }>>;
   /** 全局 ai/player 座位属于哪个游戏(筹码按游戏分开计的归属标记)。 */
-  seatsOwner: 'blackjack' | 'oldmaid' | 'holdem' | null;
+  seatsOwner: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda' | null;
 }
 
 export function newSeat(startChips: number): SeatState {
@@ -207,6 +270,36 @@ export function newHoldemSeat(): HoldemSeat {
   return { cards: [], committed: 0, street: 0, acted: false, folded: false, allIn: false };
 }
 
+export function newHanafudaState(firstMover: 'ai' | 'player'): HanafudaState {
+  return {
+    phase: 'idle',
+    round: 0,
+    firstMover,
+    turnOwner: firstMover,
+    aiHand: [],
+    playerHand: [],
+    field: [],
+    deck: [],
+    aiCollect: { light: [], tane: [], tan: [], kasu: [] },
+    playerCollect: { light: [], tane: [], tan: [], kasu: [] },
+    aiScore: 0,
+    playerScore: 0,
+    matchScores: { ai: 0, player: 0 },
+    turnStartScore: 0,
+    aiKoikoi: false,
+    playerKoikoi: false,
+    winner: null,
+    matchOver: false,
+    finalWinner: null,
+    pickOwner: null,
+    pickCards: [],
+    pendingCard: null,
+    pendingDraw: false,
+    newYaku: [],
+    history: [],
+  };
+}
+
 export function newHoldemState(button: 'ai' | 'player'): HoldemState {
   return {
     phase: 'idle',
@@ -232,6 +325,7 @@ export function newTable(startChips: number): TableState {
     blackjack: null,
     oldmaid: null,
     holdem: null,
+    hanafuda: null,
     ai: newSeat(startChips),
     player: newSeat(startChips),
     shoe: [],
@@ -262,15 +356,23 @@ export function recordHoldem(state: TableState, record: HoldemRecord): void {
   if (state.holdem!.history.length > MAX_HELDOM_HISTORY) state.holdem!.history.length = MAX_HELDOM_HISTORY;
 }
 
+const MAX_HANAFUDA_HISTORY = 30;
+
+export function recordHanafuda(state: TableState, record: HanafudaRecord): void {
+  state.hanafuda!.history.unshift(record);
+  if (state.hanafuda!.history.length > MAX_HANAFUDA_HISTORY) state.hanafuda!.history.length = MAX_HANAFUDA_HISTORY;
+}
+
 export function formatHand(cards: readonly Card[]): string[] {
   return cards.map((card) => formatCard(card));
 }
 
-/** 0.5.x 的平面存档结构(没有 blackjack / oldmaid / holdem 子对象键)。 */
-type LegacyTableState = Omit<TableState, 'blackjack' | 'oldmaid' | 'holdem' | 'gameSeats' | 'seatsOwner'> & {
+/** 0.5.x 的平面存档结构(没有 blackjack / oldmaid / holdem / hanafuda 子对象键)。 */
+type LegacyTableState = Omit<TableState, 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda' | 'gameSeats' | 'seatsOwner'> & {
   blackjack?: BlackjackState;
   oldmaid?: OldMaidState;
   holdem?: HoldemState;
+  hanafuda?: HanafudaState;
   gameSeats?: TableState['gameSeats'];
   seatsOwner?: TableState['seatsOwner'];
 };
@@ -291,6 +393,7 @@ export function loadTable(dataDir: string): TableState | null {
         blackjack: null,
         oldmaid: null,
         holdem: null,
+        hanafuda: null,
         ai: parsed.ai,
         player: parsed.player,
         shoe: Array.isArray(parsed.shoe) ? parsed.shoe : [],
@@ -301,7 +404,11 @@ export function loadTable(dataDir: string): TableState | null {
     }
     // 0.6.x 存档没有 holdem 子对象(0.6.2 及更早):补 null 键,其余原样保留。
     if (parsed.holdem === undefined) {
-      return { ...(parsed as TableState), holdem: null, gameSeats: {}, seatsOwner: null };
+      return { ...(parsed as TableState), holdem: null, hanafuda: null, gameSeats: {}, seatsOwner: null };
+    }
+    // 0.7.x ~ 1.0.5 存档没有 hanafuda 子对象:补 null 键。
+    if (parsed.hanafuda === undefined) {
+      return { ...(parsed as TableState), hanafuda: null };
     }
     // 0.7.0 开发档没有 gameSeats(筹码当时全局共享):把全局座位回填给挂起的筹码游戏。
     if (parsed.gameSeats === undefined) {

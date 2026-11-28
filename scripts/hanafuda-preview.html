@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>月下牌桌 · 花札对局预览</title>
+<style>
+  body { background: #101418; padding: 24px; font-family: system-ui, sans-serif; }
+  #panel { max-width: 560px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="panel"></div>
+<script type="module">
+  // 用假宿主跑真实打包产物:花札对局进行中(玩家回合,手牌可点)。
+  const root = document.getElementById('panel');
+  const snapshot = {
+    version: 20, game: 'hanafuda', phase: 'playHand',
+    ai: { chips: 1000, wins: 0, losses: 0, pushes: 0, net: 0, bankruptcies: 0 },
+    player: { chips: 1000, wins: 0, losses: 0, pushes: 0, net: 0, bankruptcies: 0 },
+    minBet: 10, maxBet: 200, startChips: 1000, dealerHitsSoft17: false, matches: [],
+    round: 2, roundsTotal: 3, turnOwner: 'player', winner: null,
+    matchOver: false, finalWinner: null, pickOwner: null,
+    fieldCards: [{ r: 1, s: 2, id: 0 }, { r: 3, s: 2, id: 0 }, { r: 8, s: 1, id: 0 }, { r: 9, s: 2, id: 0 }, { r: 12, s: 2, id: 1 }, { r: 6, s: 3, id: 0 }],
+    handCards: [{ r: 1, s: 0, id: 0 }, { r: 2, s: 1, id: 0 }, { r: 4, s: 2, id: 0 }, { r: 9, s: 1, id: 0 }, { r: 11, s: 3, id: 0 }, { r: 12, s: 2, id: 0 }],
+    aiHandCount: 5, deckCount: 22,
+    aiCollect: { light: ['松上鹤'], tane: ['萩上猪'], tan: ['梅赤短'], kasu: ['芒粕', '芒粕', '桐粕', '桐粕'] },
+    playerCollect: { light: ['樱上幕'], tane: ['牡丹蝶'], tan: ['牡丹青短', '菊青短'], kasu: ['柳粕'] },
+    aiScore: 0, playerScore: 5, matchScores: { ai: 8, player: 5 },
+    aiKoikoi: false, playerKoikoi: false, newYaku: [],
+    hanafudaHistory: [{ at: '2026-11-28T11:20:00+08:00', round: 1, winner: 'ai', aiScore: 8, playerScore: 0 }],
+  };
+  const ctx = {
+    root,
+    signal: new AbortController().signal,
+    language: 'zh',
+    pageId: 'world:casino',
+    panelId: 'table',
+    async invoke(method) {
+      if (method === 'state') return snapshot;
+      throw new Error('stub');
+    },
+    stream(handlers) {
+      window.__push = () => handlers.message(JSON.stringify(snapshot));
+      return { dispose() {} };
+    },
+  };
+  const mod = await import('./webui.js');
+  await mod.default.panels.table.mount(ctx);
+  window.__panelReady = true;
+</script>
+</body>
+</html>

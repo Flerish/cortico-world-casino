@@ -1,12 +1,13 @@
 /** @casino 联机协议:文本格式简单稳定,便于提示注入防护(只有整行精确匹配才算协议)。 */
-export type OnlineGame = 'blackjack' | 'oldmaid' | 'holdem';
-export const ONLINE_GAMES: readonly OnlineGame[] = ['blackjack', 'oldmaid', 'holdem'];
+export type OnlineGame = 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda';
+export const ONLINE_GAMES: readonly OnlineGame[] = ['blackjack', 'oldmaid', 'holdem', 'hanafuda'];
 export const ONLINE_PREFIX = '@casino';
 
 /** 协议动作全集;解析时按动作严格校验参数形态。 */
 export const ONLINE_ACTIONS = [
   'invite', 'accept', 'decline',
   'start', 'hand', 'state', 'act', 'settle', 'handoff', 'rest', 'stop', 'reject',
+  'ping', 'pong',
 ] as const;
 export type OnlineAction = (typeof ONLINE_ACTIONS)[number];
 
@@ -45,15 +46,19 @@ export function parseOnlineMessage(text: string): OnlineMessage | null {
     if (bare.length === 1 && !game) return null;
   } else if (action === 'act') {
     if (!bare.length) return null;
-    // 三游戏全动作集(21点:bet/hit/stand/double;抽鬼牌:draw;德州:fold/check/call/bet/raise)——
-    // 世界层按当前会话游戏校验,解析层只做形态校验。
-    if (!['bet', 'hit', 'stand', 'double', 'draw', 'fold', 'check', 'call', 'raise'].includes(bare[0]!)) return null;
-    if ((bare[0] === 'bet' || bare[0] === 'raise') && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
-    if (bare[0] !== 'bet' && bare[0] !== 'raise' && bare.length !== 1) return null;
+    // 四游戏全动作集(21点:bet/hit/stand/double;抽鬼牌:draw;德州:fold/check/call/bet/raise;
+    // 花札:play/pick(带 index)、koikoi、yame=收手)——世界层按当前会话游戏校验,解析层只做形态校验。
+    if (!['bet', 'hit', 'stand', 'double', 'draw', 'fold', 'check', 'call', 'raise', 'play', 'pick', 'koikoi', 'yame'].includes(bare[0]!)) return null;
+    if ((bare[0] === 'bet' || bare[0] === 'raise' || bare[0] === 'play' || bare[0] === 'pick') && (bare.length !== 2 || !/^\d+$/.test(bare[1] ?? ''))) return null;
+    if (bare[0] !== 'bet' && bare[0] !== 'raise' && bare[0] !== 'play' && bare[0] !== 'pick' && bare.length !== 1) return null;
   } else if (action === 'hand') {
     if (bare.length) return null; // hand 无裸参数,kv 允许(抽鬼牌开局带闲家手牌)
   } else if (action === 'state') {
     if (bare.length || !Object.keys(kv).length) return null; // state 只收 key=value 参数
+  } else if (action === 'ping' || action === 'pong') {
+    // 心跳:无裸参数;kv 允许 ingame=0/1(会话状态随心跳广播,好友列表的对局中标记双方一致)。
+    if (bare.length) return null;
+    if (kv.ingame !== undefined && !/^[01]$/.test(kv.ingame)) return null;
   } else {
     // settle / handoff / rest / stop / reject:只收 key=value 参数
     if (bare.length) return null;

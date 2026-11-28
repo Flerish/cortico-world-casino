@@ -22,7 +22,7 @@ export function freshDeck(): Card[] {
   return deck;
 }
 
-export function shuffled(deck: Card[], rng: () => number): Card[] {
+export function shuffled<T extends Card>(deck: T[], rng: () => number): T[] {
   const out = [...deck];
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));

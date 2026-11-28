@@ -74,6 +74,7 @@ function rigTable(patch: {
           ...(patch.oldmaid ?? {}),
         }
       : null,
+    hanafuda: null,
     ai: { ...newSeat(patch.aiChips ?? 1000), chips: patch.aiChips ?? 1000 },
     player: { ...newSeat(patch.playerChips ?? 1000), chips: patch.playerChips ?? 1000 },
     shoe: patch.shoe ?? [],
@@ -559,6 +560,7 @@ describe('Casino World(21 点 + 抽鬼牌)', () => {
       },
       oldmaid: null,
       holdem: null,
+      hanafuda: null,
       ai: newSeat(1000),
       player: newSeat(1000),
       shoe: [],

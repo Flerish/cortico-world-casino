@@ -129,12 +129,60 @@ const zh = {
       <li>弃牌局不亮弃牌方的底牌;摊牌局双方亮牌。</li>
     </ul>
   `,
+  rulesHanafudaHtml: `
+    <h4>怎么开局</h4>
+    <p>点「开局」→ 整副 48 张花札(12 个月 × 4 张)洗匀 → 你 8 张手牌、场中 8 张明牌、山札 32 张 → 先手打牌(首局你先,之后每局轮换)。</p>
+    <h4>回合怎么走</h4>
+    <ul>
+      <li><b>打一张:</b>点自己手牌打出;与场牌同月即收走(花札配对只看月份),没有就留在场上。</li>
+      <li><b>翻一张:</b>引擎从山札翻一张,同样配对收走或留场。</li>
+      <li><b>同月两张:</b>场上有两张同月时,点选收哪一张,另一张留在场。</li>
+      <li><b>同月三张:</b>叠成一摞,一次收走整摞。</li>
+    </ul>
+    <h4>役与こいこい</h4>
+    <ul>
+      <li>收取让役分增加时,进入决策:<b>收手</b>结算(自己的役分换筹码),或<b>こいこい</b>继续搏更高役。</li>
+      <li>喊こいこい后被对方反超收手,对方得分翻倍;收手 7 文以上再翻倍(可配置)。</li>
+      <li>全部役种点桌面右上角的「役种表」查看(图文对照)。</li>
+      <li><b>菊上杯(9♥)双属性:</b>既算种也可当粕计数——花札最著名的特殊规则。</li>
+    </ul>
+    <h4>胜负</h4>
+    <ul>
+      <li>手牌与山札打完都没人收手 = 流局。默认 3 局比累计文(可配 6/12 局),文差直接换算筹码。</li>
+      <li>场牌与收集区双方公开;只有手牌是秘密。</li>
+    </ul>
+  `,
+  yakuBtn: '役种表',
+  yakuTitle: '花札役种一览(こいこい)',
+  yakuNote: '役分 = 下面各役之和;光系只计最高一档。菊上杯(9♥)既算种也可当粕。收手 7 文以上翻倍,喊こいこい被反超对方翻倍。',
+  yakuSectionLight: '光系',
+  yakuSectionKind: '种与短册',
+  yakuSectionCount: '集数役',
+  yakuPoints: (n: number) => `${n} 文`,
+  yakuBonus: (base: number, per: string) => `${base} 文起 · 每多 1 张${per} +1`,
+  yakuAny: '示例组合',
+  yakuClose: '关闭',
+  yakuGoko: '收齐全部五张光牌:松鹤、樱幕、芒月、柳雨、桐上凤凰。',
+  yakuAmeShiko: '四张光牌且含柳间雨(11♠)——含雨的光役只有这一档。',
+  yakuShiko: '四张光牌,不含柳间雨。',
+  yakuSanko: '三张光牌,不含柳间雨。',
+  yakuIno: '萩上猪(7♥)+ 红叶鹿(10♥)+ 牡丹蝶(6♥)三张种牌凑齐。',
+  yakuAka: '松、梅、樱的三张赤短册(A♦2♦3♦)凑齐。',
+  yakuAo: '牡丹、菊、红叶的三张青短册(6♦9♦10♦)凑齐。',
+  yakuHanami: '樱上幕(3♠)+ 菊上杯(9♥),赏花对饮。',
+  yakuTsukimi: '芒上月(8♠)+ 菊上杯(9♥),赏月对饮。',
+  yakuTan: '任意 5 张短册起;示例为无字短册。赤短、青短的成员也计入张数。',
+  yakuTane: '任意 5 张种起;菊上杯(9♥)计入。猪鹿蝶成员也计入张数。',
+  yakuKasu: '任意 10 张粕起;菊上杯(9♥)可计入。示例组合。',
+  yakuPerKind: '种',
+  yakuPerTan: '短册',
+  yakuPerKasu: '粕',
   rulesCloseBtn: '知道了,继续',
   modeMenu: {
     subtitle: '选择模式',
     localTitle: '本地模式',
     localTag: 'LOCAL',
-    localDesc: '和你的 AI 同桌:21 点、抽鬼牌、德州扑克,牌桌已就绪。',
+    localDesc: '和你的 AI 同桌对玩:多种玩法任选,牌桌已就绪。',
     localBtn: '进入牌桌',
     onlineTitle: '联机模式',
     onlineTag: 'ONLINE',
@@ -173,6 +221,7 @@ const zh = {
     gameBlackjack: '21 点',
     gameOldmaid: '抽鬼牌',
     gameHoldem: '德州扑克',
+    gameHanafuda: '花札',
     spectateTitle: '观战模式',
     spectateExit: '退出观战',
     spectateEmpty: '暂无',
@@ -203,6 +252,10 @@ const zh = {
     holdemTag: "HOLD 'EM",
     holdemDesc: '两人单挑:两张底牌加五张公共牌,限注单挑——庄位每手轮换,加注封顶,平局分池。',
     holdemStart: '开局',
+    hanafudaTitle: '花札',
+    hanafudaTag: 'KOI-KOI',
+    hanafudaDesc: '日本传统花牌:配对只看月份,凑齐役收手计分——或喊こいこい继续,搏更高役。',
+    hanafudaStart: '开局',
     searchPlaceholder: '搜索游戏…',
     noMatch: '没有匹配的游戏。',
     pausedTag: '上局未完',
@@ -215,6 +268,7 @@ const zh = {
     blackjackKw: ['21点', '二十一点', '21 点', 'blackjack', '比点', '庄家', 'bj'],
     oldmaidKw: ['抽鬼牌', '鬼牌', 'old maid', 'oldmaid', '抽牌'],
     holdemKw: ['德州', '德州扑克', '扑克', 'holdem', "hold 'em", 'texas', '单挑', 'poker'],
+    hanafudaKw: ['花札', 'hanafuda', 'koi', 'こいこい', '花牌', '牌面'],
   },
   oldmaid: {
     yourTurn: '轮到你:点对方一张背面牌,把它抽走',
@@ -229,6 +283,28 @@ const zh = {
     backLobbyBtn: '返回主菜单',
     hiddenReveal: (h: string) => `开局藏起的牌:${h}(它同点的落单牌就是鬼牌)`,
     historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · 弃 ${pairs} 对 · 藏 ${hidden}` : `${when} · 弃 ${pairs} 对`,
+  },
+  hanafuda: {
+    yourTurn: '轮到你:点自己一张手牌打出(与场牌同月即收走)',
+    aiTurn: 'AI 打牌中…(它已收到通知)',
+    pickPrompt: '场上有两张同月牌:点一张收走它(另一张留场)',
+    koikoiBtn: 'こいこい(继续)',
+    stopBtn: '收手结算',
+    winnerYou: '你胜',
+    winnerOpp: '对方胜',
+    winnerDraw: '流局',
+    yakuBanner: (yaku: string) => `成役:${yaku}`,
+    roundLabel: (round: number, total: number) => `第 ${round}/${total} 局`,
+    scoreLabel: (ai: number, p: number) => `役分 你 ${ai} — 对方 ${p}`,
+    matchLabel: (ai: number, p: number) => `累计文 你 ${ai} — 对方 ${p}`,
+    deckLabel: (n: number) => `山札 ${n} 张`,
+    collectLabel: (l: number, t: number, tan: number, k: number) => `光${l} · 种${t} · 短${tan} · 粕${k}`,
+    drawBanner: '流局——双方都没收手,下一局重新发牌',
+    winBanner: (ai: number, p: number) => `整场打完:你 ${ai} 文 — 对方 ${p} 文!`,
+    loseBanner: (ai: number, p: number) => `整场打完:对方 ${p} 文 — 你 ${ai} 文。`,
+    tieBanner: (ai: number, p: number) => `整场打完:双方 ${ai} — ${p} 文,平局。`,
+    againBtn: '再来一场',
+    historyLine: (when: string, round: number, winner: string, aiScore: number, pScore: number) => `${when} · 第 ${round} 局 ${winner} ${aiScore}:${pScore}`,
   },
   holdem: {
     potLabel: '底池',
@@ -404,12 +480,60 @@ const en: PanelText = {
       <li>A folded hand is never revealed; both hands are shown at showdown.</li>
     </ul>
   `,
+  rulesHanafudaHtml: `
+    <h4>Starting a game</h4>
+    <p>Tap "Start" → the full 48-card hanafuda deck (12 months × 4 cards) is shuffled → you hold 8, the field shows 8 face up, the deck holds 32 → the first mover plays (you first in round 1; the first mover alternates every round).</p>
+    <h4>A turn</h4>
+    <ul>
+      <li><b>Play one:</b> click a hand card; a same-month field card is taken with it (hanafuda pairs by month only), otherwise it stays on the field.</li>
+      <li><b>Draw one:</b> the engine flips a deck card and applies the same pairing.</li>
+      <li><b>Two of a month:</b> when the field holds two matching cards, click the one to take; the other stays.</li>
+      <li><b>Three of a month:</b> they stack — one click takes the whole stack.</li>
+    </ul>
+    <h4>Yaku and koikoi</h4>
+    <ul>
+      <li>When a capture raises your point total you decide: <b>stop</b> and bank your points as chips, or <b>koikoi</b> and gamble for higher yaku.</li>
+      <li>If you called koikoi and the opponent overtakes and stops, their score doubles; scores of 7+ double again (configurable).</li>
+      <li>Main yaku: five lights 15 / rain four 8 / four 8 / three 6; boar-deer-butterfly, red and blue tan 5 each with bonuses; flower/s moon viewing; 5 tan / 5 seeds / 10 chaff and up.</li>
+      <li><b>The chrysanthemum cup (9♥) counts as both seed and chaff</b> — hanafuda's most famous dual-role rule.</li>
+    </ul>
+    <h4>Scoring</h4>
+    <ul>
+      <li>Nobody stops before hand and deck run out = a draw. Default 3 rounds by total points (6/12 configurable); the point gap converts straight to chips.</li>
+      <li>Field and collected piles are public; only hands are secret.</li>
+    </ul>
+  `,
+  yakuBtn: 'Yaku list',
+  yakuTitle: 'Hanafuda yaku (Koi-Koi)',
+  yakuNote: 'Score = sum of all yaku below; light-tier yaku count only the highest. The chrysanthemum cup (9♥) counts as both seed and chaff. Stopping at 7+ points doubles; if you called koikoi and are overtaken, the opponent doubles.',
+  yakuSectionLight: 'Lights',
+  yakuSectionKind: 'Seeds & tanzaku',
+  yakuSectionCount: 'Accumulation',
+  yakuPoints: (n: number) => `${n} pts`,
+  yakuBonus: (base: number, per: string) => `${base} pts · +1 per extra ${per}`,
+  yakuAny: 'example combo',
+  yakuClose: 'Close',
+  yakuGoko: 'Collect all five lights: pine crane, cherry curtain, susuki moon, willow rain, paulownia phoenix.',
+  yakuAmeShiko: 'Four lights including the willow rain (J♠) — the only light yaku that counts the rain.',
+  yakuShiko: 'Four lights, not including the rain.',
+  yakuSanko: 'Three lights, not including the rain.',
+  yakuIno: 'Boar (7♥), deer (10♥) and butterfly (6♥) — the three seed cards together.',
+  yakuAka: 'The three red tanzaku of pine, plum and cherry (A♦ 2♦ 3♦).',
+  yakuAo: 'The three blue tanzaku of peony, chrysanthemum and maple (6♦ 9♦ 10♦).',
+  yakuHanami: 'Cherry curtain (3♠) + chrysanthemum cup (9♥) — flower viewing.',
+  yakuTsukimi: 'Susuki moon (8♠) + chrysanthemum cup (9♥) — moon viewing.',
+  yakuTan: 'Any 5 tanzaku and up (example: plain ones); red/blue members count toward it.',
+  yakuTane: 'Any 5 seeds and up; the chrysanthemum cup (9♥) counts. Boar-deer-butterfly members count too.',
+  yakuKasu: 'Any 10 chaff and up; the chrysanthemum cup may count. Example combo.',
+  yakuPerKind: 'seed',
+  yakuPerTan: 'tanzaku',
+  yakuPerKasu: 'chaff',
   rulesCloseBtn: 'Got it, continue',
   modeMenu: {
     subtitle: 'Pick a mode',
     localTitle: 'Local table',
     localTag: 'LOCAL',
-    localDesc: "Face your AI across the felt: Blackjack, Old Maid and Texas Hold'em, all ready to deal.",
+    localDesc: 'Face your AI across the felt: several games to pick from, table always ready.',
     localBtn: 'Enter the table',
     onlineTitle: 'Online mode',
     onlineTag: 'ONLINE',
@@ -448,6 +572,7 @@ const en: PanelText = {
     gameBlackjack: 'Blackjack',
     gameOldmaid: 'Old Maid',
     gameHoldem: "Hold'em",
+    gameHanafuda: 'Hanafuda',
     spectateTitle: 'Spectator mode',
     spectateExit: 'Exit spectating',
     spectateEmpty: 'none yet',
@@ -479,6 +604,10 @@ const en: PanelText = {
     holdemTag: 'HEADS-UP',
     holdemDesc: 'Two players, two hole cards and five community cards; capped-limit heads-up — the button swaps every hand, ties split the pot.',
     holdemStart: 'Start',
+    hanafudaTitle: 'Hanafuda',
+    hanafudaTag: 'KOI-KOI',
+    hanafudaDesc: 'Japanese flower cards: pairs match by month only — form yaku to bank points, or call koikoi and gamble for higher.',
+    hanafudaStart: 'Start',
     searchPlaceholder: 'Search games…',
     noMatch: 'No matching game.',
     pausedTag: 'UNFINISHED',
@@ -491,6 +620,7 @@ const en: PanelText = {
     blackjackKw: ['blackjack', '21', 'twenty-one', 'dealer', 'bj', '二十一点', '21点'],
     oldmaidKw: ['old maid', 'oldmaid', 'draw', '抽鬼牌', '鬼牌'],
     holdemKw: ["hold'em", 'hold em', 'holdem', 'texas', 'poker', 'heads-up', '德州', '德州扑克'],
+    hanafudaKw: ['hanafuda', 'koi-koi', 'koi', 'flower cards', '花札', '花牌'],
   },
   oldmaid: {
     yourTurn: 'Your turn: click a face-down card to take it',
@@ -505,6 +635,28 @@ const en: PanelText = {
     backLobbyBtn: 'Main menu',
     hiddenReveal: (h: string) => `Hidden at the deal: ${h} (its rank-mate is the Old Maid)`,
     historyLine: (when: string, pairs: number, hidden: string) => hidden ? `${when} · ${pairs} pairs · hid ${hidden}` : `${when} · ${pairs} pairs`,
+  },
+  hanafuda: {
+    yourTurn: 'Your turn: click one of your hand cards to play it (a matching field card is taken)',
+    aiTurn: 'The AI is playing… (it has been notified)',
+    pickPrompt: 'Two matching field cards: click one to take it (the other stays)',
+    koikoiBtn: 'Koikoi (keep going)',
+    stopBtn: 'Stop & settle',
+    winnerYou: 'you won',
+    winnerOpp: 'they won',
+    winnerDraw: 'draw',
+    yakuBanner: (yaku: string) => `Yaku: ${yaku}`,
+    roundLabel: (round: number, total: number) => `Round ${round}/${total}`,
+    scoreLabel: (ai: number, p: number) => `Points you ${ai} — them ${p}`,
+    matchLabel: (ai: number, p: number) => `Match you ${ai} — them ${p}`,
+    deckLabel: (n: number) => `${n} in deck`,
+    collectLabel: (l: number, t: number, tan: number, k: number) => `L${l} · S${t} · T${tan} · C${k}`,
+    drawBanner: 'Draw — nobody stopped; dealing the next round',
+    winBanner: (ai: number, p: number) => `Match over: you ${ai} — them ${p} points!`,
+    loseBanner: (ai: number, p: number) => `Match over: they ${p} — you ${ai} points.`,
+    tieBanner: (ai: number, p: number) => `Match over: ${ai} — ${p} points, a tie.`,
+    againBtn: 'New match',
+    historyLine: (when: string, round: number, winner: string, aiScore: number, pScore: number) => `${when} · round ${round} ${winner} ${aiScore}:${pScore}`,
   },
   holdem: {
     potLabel: 'Pot',

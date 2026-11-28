@@ -31,21 +31,43 @@ import { RemoteBlackjack } from './remote-blackjack.ts';
 import { RemoteOldMaid } from './remote-oldmaid.ts';
 import { RemoteHoldem, type RemoteHoldemAct } from './remote-holdem.ts';
 import { modelText, readModelLanguage, readOwnerLabel, type ModelText } from './model-text.ts';
+import {
+  freshHanafudaDeck,
+  evaluateYaku,
+  hanafudaAiKoikoi,
+  hanafudaAiPick,
+  hanafudaAiPlay,
+  HANAFUDA_LIGHT,
+  HANAFUDA_TANE,
+  HANAFUDA_TAN,
+  HANAFUDA_KASU,
+  YAKU_PRESET_FUDAWIKI,
+  YAKU_PRESET_NINTENDO,
+  type YakuOptions,
+  type HanaCard,
+} from './hanafuda.ts';
+import { RemoteHanafuda } from './remote-hanafuda.ts';
+import { hanafudaCardName } from './webui/hanafuda-cards.ts';
 import { loadMatches, MATCHES_LIMIT, saveMatches, type MatchRecord } from './matches.ts';
 import {
   formatHand,
   loadTable,
   newSeat,
   newBlackjackState,
+  newHanafudaState,
   newHoldemSeat,
   newHoldemState,
   newOldMaidState,
   newTable,
   recordHand,
   recordHoldem,
+  recordHanafuda,
   recordOldMaid,
   saveTable,
   type BlackjackState,
+  type HanafudaCollect,
+  type HanafudaRecord,
+  type HanafudaState,
   type HandRecord,
   type HoldemRecord,
   type HoldemSeat,
@@ -60,6 +82,20 @@ import {
 /** 德州点数的显示名(A 记 14 的显示仍是 A)。 */
 function pokerRankLabel(r: number): string {
   return r === 14 ? 'A' : r === 13 ? 'K' : r === 12 ? 'Q' : r === 11 ? 'J' : String(r);
+}
+
+/** 协议牌名文本(A♠)→ 花札牌(id 恒 0:同月同类的粕观感一致)。联机客座自动决策与观战映射共用。 */
+function parseCardText(text: string): HanaCard {
+  const s = ({ '♠': 0, '♥': 1, '♣': 2, '♦': 3 } as Record<string, number>)[text.slice(0, 1)] ?? 0;
+  const rankText = text.slice(1);
+  const r = /^\d+$/.test(rankText) ? Number(rankText) : ({ A: 1, J: 11, Q: 12 } as Record<string, number>)[rankText] ?? 1;
+  return { rank: r, suit: s, id: 0 };
+}
+
+/** 逗号分隔的牌名列表 → 牌数组(none/空 → 空数组)。 */
+function parseCardList(text: string | undefined): HanaCard[] {
+  if (!text || text === 'none') return [];
+  return text.split(',').filter(Boolean).map(parseCardText);
 }
 
 const ENV_PROMPT_FILES: Record<'zh' | 'en', string> = {
@@ -205,6 +241,21 @@ export const CASINO_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       required: ['action'],
     },
   },
+  {
+    name: 'hanafuda_act',
+    description:
+      'Act in a Hanafuda (Koi-Koi) round when it is your turn: play a hand card (index), pick which of two matching field cards to take (index), koikoi to keep playing after forming a yaku, or stop to settle. The receipt echoes the field and your collected yaku.',
+    tags: ['act'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['play', 'pick', 'koikoi', 'stop'], description: 'The action to take.' },
+        index: { type: 'number', description: 'For play: the hand card index. For pick: which field card (0 or 1).' },
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 interface StarpostState {
@@ -216,6 +267,8 @@ interface StarpostState {
   lastQuota: unknown;
   invites: OnlineInvite[];
   activity: Record<string, number>;
+  /** 对端随心跳广播的会话状态(好友列表的"对局中"标记双方一致显示用)。 */
+  peerPresence: Record<string, { ingame: boolean; at: number }>;
   friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
   presenceTimer: ReturnType<typeof setInterval> | null;
   /** 自适应轮询链的代际号(重装配自增,旧链自动退场)。 */
@@ -228,7 +281,7 @@ export interface OnlineSessionShape {
   peer: string;
   chips: Record<string, number>;
   bank: string;
-  engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem | null;
+  engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem | RemoteHanafuda | null;
   timers: Array<ReturnType<typeof setTimeout>>;
   handsTotal: number;
   /** 最近一次收到对方会话消息的时间戳(超时自动结束的依据)。 */
@@ -261,9 +314,11 @@ export class CasinoWorld implements World {
   invites: OnlineInvite[];
   /** 好友最近活动时间戳(botId → ms):面板在线状态的依据;重启清零。 */
   activity: Record<string, number>;
+  /** 对端随心跳广播的会话状态(好友列表的"对局中"标记双方一致显示用)。 */
+  peerPresence: Record<string, { ingame: boolean; at: number }>;
   /** 好友列表缓存(15s 过期,避免面板 1s 刷新直打星邮服务器)。 */
   friendsCache: { fetchedAt: number; list: Array<{ id: string; nickname?: string; bot: boolean }> } | null;
-  /** presence 心跳定时器:对好友周期性 poke(不耗消息配额),维持在线判定。 */
+  /** presence 心跳定时器:对好友周期性发协议 ping,维持在线判定与状态一致。 */
   presenceTimer: ReturnType<typeof setInterval> | null;
   /** 自适应轮询链的代际号:重装配时自增,旧链看到代际不符自动退场(防双链互踩)。 */
   pollChain?: number;
@@ -376,7 +431,7 @@ export class CasinoWorld implements World {
         { serverUrl: cfg.starpostServer, botId: cfg.starpostBotId, token: cfg.starpostToken },
         { post: this.opts.starpostPost },
       );
-      const state: StarpostState = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: null, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null, presenceTimer: null };
+      const state: StarpostState = { client, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: null, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, peerPresence: {}, friendsCache: null, presenceTimer: null };
       this.starpost = state;
       // 异步验证 + 首轮拉取:不阻塞挂载,结果写进 lastError/lastPollAt。
       // 启动瞬间网络抖动会让首次 snapshot 失败;自动重试(最多 5 次,间隔递增),避免联机永久瘫痪。
@@ -401,17 +456,20 @@ export class CasinoWorld implements World {
             try {
               const view = await client.friends();
               state.friendsCache = { fetchedAt: Date.now(), list: view.profiles.map((p) => ({ id: String(p.id), nickname: p.nickname, bot: p.accountType === 'bot' })) };
+              // 在线判定靠心跳:向 bot 好友发协议 ping(私聊消息,对端静默回 pong)——双方互相保活。
+              // 旧 poke 是服务器侧 rpc,对方收件箱里不产生消息,activity 永远不更新(双双显示离线的根因)。
+              const myInGame = state.session ? 1 : 0;
               for (const f of state.friendsCache.list) {
-                if (f.id === client.botId) continue;
-                await client.rpc('poke', { to: f.id }).catch(() => {});
+                if (f.id === client.botId || !f.bot) continue;
+                await client.sendPrivate(f.id, onlineLine('ping', ['ingame=' + myInGame])).catch(() => {});
               }
               state.lastError = null;
-              console.log(`[casino] presence 心跳:${state.friendsCache?.list.filter((f) => f.bot).length ?? 0} 个 bot 好友已戳`);
+              console.log(`[casino] presence 心跳:${state.friendsCache?.list.filter((f) => f.bot).length ?? 0} 个 bot 好友已 ping`);
             } catch (e) { console.log(`[casino] presence 心跳失败(下一轮重试):${(e as Error).message}`); }
           };
           if (state.presenceTimer) clearInterval(state.presenceTimer); // 重装配先清旧心跳,防止翻倍
-          state.presenceTimer = setInterval(() => { void presenceTick(); }, 8 * 60 * 1000);
-          setTimeout(() => { void presenceTick(); }, 30 * 1000); // 首轮 30s 后开始
+          state.presenceTimer = setInterval(() => { void presenceTick(); }, 2 * 60 * 1000);
+          setTimeout(() => { void presenceTick(); }, 15 * 1000); // 首轮 15s 后开始
           // 自适应轮询:有联机会话或待回应邀约时 5s 快轮(协议消息每跳最多等 5s),空闲回落到配置间隔。
           if (pollMs > 0) {
             state.pollChain = (state.pollChain ?? 0) + 1;
@@ -419,7 +477,8 @@ export class CasinoWorld implements World {
             const scheduleNext = (): void => {
                if (state.pollChain !== chain) return; // 新装配已接管,旧链退场(防双轮询链互踩)
                if (state.timer) clearTimeout(state.timer);
-               const active = Boolean(state.session) || state.invites.some((i) => i.status === 'pending');
+               // 撮合窗口也算活跃:邀约 accepted 但会话未建成的间隙(accept→start 在途),慢轮 60s 会让双方'等很久才进局'。保持 5s 快轮直到会话建成或邀约过期(accepted 记录 20 分钟自动失效)。
+              const active = Boolean(state.session) || state.invites.some((i) => i.status === 'pending' || (i.status === 'accepted' && Date.now() - Date.parse(i.at) < 20 * 60 * 1000));
                const ms = active ? Math.min(5000, pollMs) : pollMs;
                state.timer = setTimeout(() => { void this.starpostPoll().then(scheduleNext).catch(scheduleNext); }, ms);
              };
@@ -428,7 +487,7 @@ export class CasinoWorld implements World {
         })
         .catch((error) => { state.lastError = (error as Error).message; });
     } catch (error) {
-      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, friendsCache: null, presenceTimer: null };
+      this.starpost = { client: null as unknown as StarpostClient, timer: null as unknown as ReturnType<typeof setInterval>, cursors: {}, lastError: (error as Error).message, lastPollAt: null, lastQuota: null, invites: [], session: null, activity: {}, peerPresence: {}, friendsCache: null, presenceTimer: null };
     }
   }
 
@@ -504,10 +563,54 @@ export class CasinoWorld implements World {
     if (sp.invites.length > 20) sp.invites.length = 20;
   }
 
+  /** 防死锁看门狗:接受邀约后对端迟迟不开局(accept 消息丢失、互邀仲裁两边互等)时,
+   *  ms 后自建庄家会话并 start。若对端其实已开局只是 start 在途丢失,双庄家由
+   *  case 'start' 的消息级仲裁收敛(botId 小者保留庄家、大者降级客座)——任何路径 15 秒内必进局。 */
+  private stallWatchdog(peer: string, game: OnlineGame, ms = 15000): void {
+    setTimeout(() => {
+      const sp = this.starpost;
+      if (!sp?.client || sp.session) return; // 会话已建立:正常收敛,静默退场
+      console.log(`[casino] 防死锁看门狗:${peer} 未在 ${Math.round(ms / 1000)} 秒开局,自动接管坐庄`);
+      void this.openBankerSession(peer, game);
+      this.onlineEvent('casino.online_state', peer, `[星邮联机] 对方未在 ${Math.round(ms / 1000)} 秒内开局,已自动由本机坐庄开局(若对方也开了局,系统会按 ID 仲裁收敛,无需处理)。`, nowIso(this.opts.timezone));
+    }, ms);
+  }
+
+  /** 建立本机庄家会话并开局(accept 收到/stall 看门狗接管共用):引擎、账本、start 发送与弱网重发。 */
+  private async openBankerSession(peer: string, game: OnlineGame): Promise<void> {
+    const sp = this.starpost!;
+    if (sp.session) return;
+    const startChips = this.opts.cfg.startChips;
+    const myId = this.myBotId();
+    const engine = this.newRemoteEngine(game, startChips);
+    sp.session = { game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
+    sp.invites.length = 0; // 开局清邀约(主人指示)
+    const session = sp.session;
+    console.log(`[casino] 会话建立:我=庄家(${myId}) 对手=${peer} 游戏=${game}`);
+    await this.onlineSend(peer, onlineLine('start', [game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
+    this.bankDealHand();
+    // 弱网补偿:start/hand 若因链路抖动丢失,对端会一直显示"空闲"(只有本方进了会话)。
+    // 每 8 秒重发一轮(最多 3 次),直到对端有任何回音(lastIncomingAt 前进)——
+    // 对端侧 start 的重复处理是幂等的(case 'start' 有会话守卫),重发安全。
+    const sentAt = Date.now();
+    const reSend = (n: number): void => {
+      const s2 = this.starpost?.session;
+      if (!s2 || s2 !== session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return; // 会话已关闭/被取代:退场
+      if (s2.lastIncomingAt > sentAt || s2.handsTotal > 0) return; // 对端已有回音
+      if (n <= 0) return;
+      void this.onlineSend(peer, onlineLine('start', [game, `chips=${myId}:${s2.chips[myId] ?? startChips},${peer}:${s2.chips[peer] ?? startChips}`]))
+        .then(() => { if (this.starpost?.session === s2) void this.bankDealHand(false); })
+        .catch(() => {});
+      s2.timers.push(setTimeout(() => reSend(n - 1), 8000));
+    };
+    session.timers.push(setTimeout(() => reSend(3), 8000));
+  }
+
   /** 按游戏建远程引擎;测试牌序仅注入 21 点(其余用 rng)。 */
-  private newRemoteEngine(game: OnlineGame, startChips: number): RemoteBlackjack | RemoteOldMaid | RemoteHoldem {
+  private newRemoteEngine(game: OnlineGame, startChips: number): RemoteBlackjack | RemoteOldMaid | RemoteHoldem | RemoteHanafuda {
     if (game === 'oldmaid') return new RemoteOldMaid({ stake: this.opts.cfg.minBet, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
     if (game === 'holdem') return new RemoteHoldem({ bigBlind: this.opts.cfg.holdemBlind, streetCap: this.opts.cfg.maxBet, bankChips: startChips, playerChips: startChips, rng: this.opts.rng });
+    if (game === 'hanafuda') return new RemoteHanafuda({ bankChips: startChips, playerChips: startChips, rng: this.opts.rng, sevenDouble: this.opts.cfg.hanafudaSevenDouble });
     return new RemoteBlackjack({
       bankChips: startChips, playerChips: startChips,
       minBet: this.opts.cfg.minBet, maxBet: this.opts.cfg.maxBet,
@@ -556,6 +659,14 @@ export class CasinoWorld implements World {
     void this.host?.pushEvent({
       type, ts: at, source: this.id, origin: 'external', senderKey: `starpost.private.${peer}`, text,
     }, { trigger: 'flush' });
+  }
+
+  /** 静默事件:只进面板事件流,**不唤醒 AI**(trigger 无 flush)。花札每步局面更新用它——
+   *  一局 20+ 回合逐个唤醒 LLM 是联机高延迟的主因;AI 只在开局/成役/结算时开口。 */
+  private onlineEventSilent(type: string, peer: string, text: string, at: string): void {
+    void this.host?.pushEvent({
+      type, ts: at, source: this.id, origin: 'external', senderKey: `starpost.private.${peer}`, text,
+    });
   }
 
   /** 关闭会话(双方通用):清定时器、清状态、推事件;notifyPeer=true 时通知对方。 */
@@ -620,6 +731,24 @@ export class CasinoWorld implements World {
       await this.afterHoldemAction(session, hd, at);
       return;
     }
+    if (session.game === 'hanafuda') {
+      // 花札:单局制(一手=一局),无下注——开局即发牌;庄家先手时自动推进到轮到客座。
+      const hf = session.engine as RemoteHanafuda;
+      if (reDeal) hf.startHand();
+      await this.bankAdvanceHanafuda(session, hf, at);
+      // 弱网自愈:与抽鬼牌同款——hand 丢失会让闲家永远等不到开局,重发(最多 3 次)。
+      const sentAt = Date.now();
+      const reHand = (n: number): void => {
+        const s2 = this.starpost?.session;
+        if (!s2 || s2 !== session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return;
+        if (s2.lastIncomingAt > sentAt) return;
+        if (n <= 0) return;
+        void this.onlineSend(session.peer, onlineLine('hand', hf.stateParts())).catch(() => {});
+        session.timers.push(setTimeout(() => reHand(n - 1), 10000));
+      };
+      session.timers.push(setTimeout(() => reHand(3), 10000));
+      return;
+    }
     await this.onlineSend(session.peer, onlineLine('hand')).catch((e) => { sp.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
     this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 新一手开始,已请 ${session.peer} 下注(会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]})。`, at);
   }
@@ -646,9 +775,10 @@ export class CasinoWorld implements World {
 
   /** 庄家轮换:原庄家发 handoff(带筹码账本),双方交换权威端;新庄家开新手。 */
   private async bankHandoff(): Promise<void> {
-    const sp = this.starpost!;
-    const session = sp.session!;
-    if (!session.engine) return;
+    const sp = this.starpost;
+    if (!sp) return; // world 已 stop(残留的节奏定时器出队后触发):直接退场
+    const session = sp.session;
+    if (!session || !session.engine) return; // 会话已被 stop 清空(节奏定时器与收尾竞态):直接退场
     const myId = this.myBotId();
     const chipsPart = `chips=${myId}:${session.chips[myId]},${session.peer}:${session.chips[session.peer]}`;
     const handsPart = `hands=${session.handsTotal}`;
@@ -669,11 +799,12 @@ export class CasinoWorld implements World {
     const act = (tokens[0] ?? '').toLowerCase();
     if (session.game === 'oldmaid') return await this.bankApplyOldMaidAct(session, engine as RemoteOldMaid, act, at);
     if (session.game === 'holdem') return await this.bankApplyHoldemAct(session, engine as RemoteHoldem, act, tokens[1], at, 'player');
+    if (session.game === 'hanafuda') return await this.bankApplyHanafudaAct(session, engine as RemoteHanafuda, act, tokens[1], at);
     return await this.bankApplyBlackjackAct(session, engine as RemoteBlackjack, act, tokens, at);
   }
 
   /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
-  private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem, at: string): Promise<void> {
+  private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem | RemoteHanafuda, at: string): Promise<void> {
     session.chips[session.bank] = engine.chips.bank;
     session.chips[session.peer] = engine.chips.player;
     session.lastState = this.kvFromParts(engine.stateParts());
@@ -745,6 +876,63 @@ export class CasinoWorld implements World {
     }
   }
 
+  /** 花札:客座动作(play/pick/koikoi/yame)落庄家引擎,再推进庄家回合直到轮到客座或结算。 */
+  private async bankApplyHanafudaAct(session: OnlineSessionShape, engine: RemoteHanafuda, act: string, indexRaw: string | undefined, at: string): Promise<void> {
+    try {
+      const index = Math.floor(Number(indexRaw ?? -1));
+      if (act === 'play') engine.playerPlay(index);
+      else if (act === 'pick') engine.playerPick(index);
+      else if (act === 'koikoi') engine.playerKoikoi();
+      else if (act === 'yame') engine.playerYame();
+      else throw new Error('花札的动作只有 play/pick/koikoi/yame');
+      await this.bankAdvanceHanafuda(session, engine, at);
+    } catch (error) {
+      const msgText = (error as Error).message;
+      if (msgText.includes('回合') || msgText.includes('已经结束')) {
+        await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch(() => {});
+        return;
+      }
+      await this.onlineSend(session.peer, onlineLine('reject', [`reason=${encodeURIComponent(msgText)}`])).catch(() => {});
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 对方动作被拒:${msgText}`, at);
+    }
+  }
+
+  /** 花札客座自动决策(联机延迟修复):按本地策略生成协议动作,LLM 只在事件里点评。
+   *  kv 来自庄家的 state:yourHand/field/pickCards(牌名文本)、myScore/oppScore。 */
+  private hanafudaAutoAction(kv: Record<string, string>): string[] {
+    if (kv.stage === 'pick') return ['pick', String(hanafudaAiPick(parseCardList(kv.pickCards)))];
+    if (kv.stage === 'decide') return [hanafudaAiKoikoi(Number(kv.myScore ?? 0), Number(kv.oppScore ?? 0)) ? 'koikoi' : 'yame'];
+    return ['play', String(hanafudaAiPlay(parseCardList(kv.yourHand), parseCardList(kv.field)))];
+  }
+
+  /** 花札庄家端自动推进:庄家回合打牌、庄家 pick、庄家决策——循环到轮到客座或结算。 */
+  private async bankAdvanceHanafuda(session: OnlineSessionShape, engine: RemoteHanafuda, at: string): Promise<void> {
+    const st = engine.state;
+    if (!st) return;
+    let guard = 0;
+    while (!st.done && guard++ < 200) {
+      if (st.pickOwner === 'bank') { engine.bankPick(); continue; }
+      if (st.pickOwner === 'player') break; // 等客座选
+      if (st.phase === 'decide') {
+        if (st.turn === 'bank') {
+          // 庄家成役:flush 一条让本机 AI 点评决策(收手/继续由启发式自动执行)。
+          this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 庄家成役:${st.newYaku.join(' · ')}(役分 我 ${st.bankScore} — 对方 ${st.playerScore}),按策略自动决定收手或继续。`, at);
+          engine.bankDecide(hanafudaAiKoikoi(st.bankScore, st.playerScore));
+        }
+        else break; // 客座决策(koikoi/yame)
+        continue;
+      }
+      if (st.turn === 'bank') { engine.bankRunTurn(); continue; }
+      break; // 轮到客座打牌
+    }
+    if (st.done) { await this.bankFinishHand(session, engine, at); return; }
+    session.lastState = this.kvFromParts(engine.stateParts());
+    await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
+    // 常规局面更新走静默事件(不唤醒 AI);成役(decide)才让 AI 开口点评决策。
+    const yakuText = st.newYaku.length ? `成役:${st.newYaku.join(' · ')}。` : '';
+    this.onlineEventSilent('casino.online_state', session.peer, `[星邮联机] 花札局面更新:${yakuText}${engine.handDetail()}。${st.turn === 'player' ? '客座将自动行动。' : ''}`, at);
+  }
+
   /** 德州:庄家本机 AI 的动作直接落引擎(不经过对方)。 */
   /** 德州:闲家协议动作(playerAct)或庄家本地动作(bankAct)统一落引擎,再推进。 */
   private async bankApplyHoldemAct(session: OnlineSessionShape, engine: RemoteHoldem, act: string, amountRaw: string | undefined, at: string, who: 'player' | 'bank' = 'player'): Promise<void> {
@@ -782,6 +970,8 @@ export class CasinoWorld implements World {
     const sp = this.starpost!;
     const session = sp.session;
     const push = (type: string, text: string): void => this.onlineEvent(type, peer, text, at);
+    /** 静默推送:只进面板事件流,不唤醒 AI(花札每步局面更新用)。 */
+    const pushSilent = (type: string, text: string): void => this.onlineEventSilent(type, peer, text, at);
 
     // —— 意向层(不受会话状态限制,但会话进行中忽略新邀约) ——
     if (msg.action === 'invite') {
@@ -795,41 +985,14 @@ export class CasinoWorld implements World {
     if (msg.action === 'accept') {
       if (sp.session) return; // 已有会话进行中,忽略新接受
       const target = sp.invites.find((i) => i.direction === 'out' && i.peer === peer && i.status === 'pending' && (!msg.game || i.game === msg.game));
-      if (!target) return;
-      target.status = 'accepted';
-      // 双向互邀竞态仲裁:双方互发邀约又互发 accept 时,两边都会走到这里各建庄家会话。
-      // 确定性规则:botId 小的一方坐庄;大的一方不建会话,等对方 start(case 'start' 建客座会话)。
-      const mutual = sp.invites.some((i) => i.direction === 'in' && i.peer === peer && (i.status === 'pending' || i.status === 'accepted'));
-      if (mutual && this.myBotId() > peer) {
-        push('casino.online_state', `[星邮联机] 双方互发了邀约,按 ID 仲裁由 ${peer} 坐庄;等待对方开局。`);
-        return;
-      }
-      // 我是庄家(邀约发出方):创建会话、筹码账本与引擎,开局。
-      const startChips = this.opts.cfg.startChips;
-      const myId = this.myBotId();
-      const engine = this.newRemoteEngine(target.game, startChips);
-      sp.session = { game: target.game, peer, chips: { [myId]: startChips, [peer]: startChips }, bank: myId, engine, timers: [], handsTotal: 0, lastState: null, lastSettle: null, lastIncomingAt: Date.now() };
-      sp.invites.length = 0; // 开局清邀约(主人指示)
-      console.log(`[casino] 会话建立:我=庄家(${this.myBotId()}) 对手=${peer} 游戏=${target.game}`);
-      await this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${startChips},${peer}:${startChips}`])).catch((e) => { sp.lastError = (e as Error).message; });
-      push('casino.online_accepted', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约。`);
-      push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${target.game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方下注,对方动作会以事件通知你。`);
-      this.bankDealHand();
-      // 弱网补偿:start/hand 若因链路抖动丢失,对端会一直显示"空闲"(只有本方进了会话)。
-      // 每 8 秒重发一轮(最多 3 次),直到对端有任何回音(lastIncomingAt 前进)——
-      // 对端侧 start 的重复处理是幂等的(case 'start' 有会话守卫),重发安全。
-      const sentAt = Date.now();
-      const reSend = (n: number): void => {
-        const s2 = this.starpost?.session;
-        if (!s2 || s2 !== sp.session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return; // 会话已关闭/被取代:退场
-        if (s2.lastIncomingAt > sentAt || s2.handsTotal > 0) return; // 对端已有回音
-        if (n <= 0) return;
-        void this.onlineSend(peer, onlineLine('start', [target.game, `chips=${myId}:${s2.chips[myId] ?? startChips},${peer}:${s2.chips[peer] ?? startChips}`]))
-          .then(() => { if (this.starpost?.session === s2) void this.bankDealHand(false); })
-          .catch(() => {});
-        s2.timers.push(setTimeout(() => reSend(n - 1), 8000));
-      };
-      session!.timers.push(setTimeout(() => reSend(3), 8000)); // accept 分支已建会话,session 此处非空
+      if (target) target.status = 'accepted';
+      // 收到 accept = 无条件坐庄开局(主人实测定论:accept 层"等对方"的仲裁分支造成双方互等死锁)。
+      // 撞车场景双方可能都收到 accept 而各建庄家会话——由 case 'start' 的消息级仲裁收敛(botId 小者保留)。
+      // 无 out 邀约同样开局:我方邀约可能已被撞车守卫转为 accept(autoAccepted),此时由我坐庄。
+      const game = msg.game ?? target?.game ?? 'blackjack';
+      await this.openBankerSession(peer, game);
+      push('casino.online_accepted', `[星邮联机] ${peer} 接受了 ${game} 邀约。`);
+      push('casino.online_session', `[星邮联机] ${peer} 接受了你的 ${game} 邀约,联机会话已开启(你是庄家,坐庄每手轮换)。正在请对方行动,对方动作会以事件通知你。`);
       return;
     }
     if (msg.action === 'decline') {
@@ -841,7 +1004,8 @@ export class CasinoWorld implements World {
     }
 
     // —— 会话层:start 创建客座会话;其余动作需已有会话且来自对手 ——
-    if (session && session.peer === peer) { session.lastIncomingAt = Date.now(); session.sendFails = 0; } // 链路恢复:清零失败计数
+    // 注意:ping/pong 心跳不算会话消息(不刷新 lastIncomingAt)——否则 15 分钟僵尸会话超时永不触发。
+    if (session && session.peer === peer && msg.action !== 'ping' && msg.action !== 'pong') { session.lastIncomingAt = Date.now(); session.sendFails = 0; } // 链路恢复:清零失败计数
     switch (msg.action) {
       case 'start': {
         // 双向开局仲裁(最终裁决):双方互 accept 后会各建庄家会话、各发一份 start——
@@ -849,7 +1013,9 @@ export class CasinoWorld implements World {
         // 此规则不依赖邀约记录,无条件收敛到唯一庄家。
         if (session && session.bank === this.myBotId() && session.engine && session.handsTotal === 0) {
           if (this.myBotId() < peer) {
-            push('casino.online_state', '[星邮联机] 双方同时开局,按 ID 仲裁:我坐庄,忽略对方的重复开局。');
+            // 重发我的 start:对方可能靠看门狗误建了庄家会话却没收到我的 start——让它按同一条仲裁规则降级客座。
+            void this.onlineSend(peer, onlineLine('start', [session.game, `chips=${this.myBotId()}:${session.chips[this.myBotId()] ?? 0},${peer}:${session.chips[peer] ?? 0}`])).catch(() => {});
+            push('casino.online_state', '[星邮联机] 双方同时开局,按 ID 仲裁:我坐庄,已通知对方降级闲家。');
             return;
           }
           await this.closeOnlineSession('双方同时开局,按 ID 仲裁由对方坐庄', false); // 我降级,不通知对方(对方是庄家)
@@ -875,6 +1041,16 @@ export class CasinoWorld implements World {
           if (kv.turn === 'you') void this.onlineSend(peer, onlineLine('act', ['draw'])).catch(() => {}); // 走带重试的发送通道
           return;
         }
+        if (session.game === 'hanafuda') {
+          // 花札:开局即发牌。常规动作(打牌/选场牌/こいこい决策)由本地策略自动执行——
+          // 一局 20+ 回合逐个等 LLM 会把延迟拖到不可用(主人反馈);开局用 flush 让 AI 说句开场白。
+          const kv = msg.kv;
+          const myTurn = kv.turn === 'you';
+          const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
+          push('casino.online_state', `[星邮联机] 新一局花札开始(第 ${session.handsTotal + 1} 局):役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${myTurn ? '打牌等动作会自动执行;成役时再决定收手或继续。' : '对方先手,稍候。'}`);
+          if (auto) void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {}); // 走带重试的发送通道
+          return;
+        }
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
         return;
       }
@@ -886,6 +1062,20 @@ export class CasinoWorld implements World {
           push('casino.online_state', `[星邮联机] ${kv.turn === 'you' ? '轮到你抽牌(已自动执行)' : '庄家抽牌中'}:你 ${kv.yourCount ?? '?'} 张 · 对方 ${kv.oppCount ?? '?'} 张 · 已弃 ${kv.pairs ?? '?'} 对 · 你的手牌 ${kv.cards ?? '?'}。`);
           // 抽牌是强制动作:轮到闲家时世界层自动抽(走带重试的通道);AI 手动抽作为兜底仍然允许。
           if (kv.turn === 'you') void this.onlineSend(peer, onlineLine('act', ['draw'])).catch(() => {});
+          return;
+        }
+        if (session.game === 'hanafuda') {
+          // 常规局面静默更新;成役(decide)才 flush 让 AI 点评决策;动作自动执行(延迟优先)。
+          const kv = msg.kv;
+          const stage = kv.stage ?? 'play';
+          const myTurn = kv.turn === 'you';
+          const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
+          const autoText = auto ? `已自动执行 act ${auto.join(' ')}。` : '';
+          const yakuText = (kv.newYaku ?? '') && kv.newYaku !== 'none' ? `成役:${kv.newYaku}。` : '';
+          const text = `[星邮联机] 花札局面:役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${yakuText}${autoText}`;
+          if (stage === 'decide') push('casino.online_state', text);
+          else pushSilent('casino.online_state', text);
+          if (auto) void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {});
           return;
         }
         if (session.game === 'holdem') {
@@ -938,6 +1128,17 @@ export class CasinoWorld implements World {
         push('casino.online_state', `[星邮联机] 你的动作被庄家拒绝:${reason}。请根据上一个 state 事件重新行动。`);
         return;
       }
+      case 'ping': {
+        // 心跳:activity 已在轮询入口按新鲜消息更新;记录对端会话状态(好友列表"对局中"一致显示),
+        // 并静默回 pong(带上自己的状态)保活对方。不进会话、不推 AI 事件。
+        sp.peerPresence[peer] = { ingame: msg.kv.ingame === '1', at: Date.now() };
+        void this.onlineSend(peer, onlineLine('pong', ['ingame=' + (sp.session ? 1 : 0)])).catch(() => {});
+        return;
+      }
+      case 'pong': {
+        sp.peerPresence[peer] = { ingame: msg.kv.ingame === '1', at: Date.now() };
+        return; // 对端心跳回应:activity 已更新,静默。
+      }
       case 'stop': {
         this.closeOnlineSession(`对方终止(${(() => { try { return decodeURIComponent(msg.kv.reason ?? 'unknown'); } catch { return msg.kv.reason ?? 'unknown'; } })()})`, false);
         return;
@@ -959,7 +1160,7 @@ export class CasinoWorld implements World {
   }
 
   /** 载入某游戏的座位:槽位有就原样续(挂起恢复),全局座位本来就属于它则不动。 */
-  private loadSeatsFor(game: 'blackjack' | 'holdem'): void {
+  private loadSeatsFor(game: 'blackjack' | 'holdem' | 'hanafuda'): void {
     const state = this.state!;
     if (state.seatsOwner === game) return;
     const slot = state.gameSeats[game];
@@ -969,7 +1170,7 @@ export class CasinoWorld implements World {
   }
 
   /** 全新开局(第一次打开或重新开始):这个游戏以初始筹码起算,旧槽位丢弃。 */
-  private freshSeatsFor(game: 'blackjack' | 'holdem'): void {
+  private freshSeatsFor(game: 'blackjack' | 'holdem' | 'hanafuda'): void {
     const state = this.state!;
     if (state.seatsOwner && state.seatsOwner !== game) this.stashSeats();
     delete state.gameSeats[game];
@@ -978,13 +1179,14 @@ export class CasinoWorld implements World {
     state.seatsOwner = game;
   }
 
-  /** 挂起的未完对局(面板据此弹「继续/重新开始」;抽鬼牌打完亮结果的不算;活动中的不算)。 */
-  private pausedGames(): Array<'blackjack' | 'oldmaid' | 'holdem'> {
+  /** 挂起的未完对局(面板据此弹「继续/重新开始」;抽鬼牌打完亮结果的与花札整场打完的不算;活动中的不算)。 */
+  private pausedGames(): Array<'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda'> {
     const state = this.state!;
-    const paused: Array<'blackjack' | 'oldmaid' | 'holdem'> = [];
+    const paused: Array<'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda'> = [];
     if (state.blackjack && state.game !== 'blackjack') paused.push('blackjack');
     if (state.oldmaid && !state.oldmaid.winner && state.game !== 'oldmaid') paused.push('oldmaid');
     if (state.holdem && state.game !== 'holdem') paused.push('holdem');
+    if (state.hanafuda && !state.hanafuda.matchOver && state.game !== 'hanafuda') paused.push('hanafuda');
     return paused;
   }
 
@@ -1013,21 +1215,31 @@ export class CasinoWorld implements World {
         this.notifyHoldemTurn();
       }
     }
+    if (state.game === 'hanafuda' && state.hanafuda) {
+      // 花札没有异步中段:停在 AI 的打牌或决策回合则叫它。
+      const h = state.hanafuda;
+      if (!h.matchOver && h.turnOwner === 'ai' && (h.phase === 'playHand' || h.phase === 'decide')) {
+        if (h.phase === 'decide') this.notifyHanafudaDecide();
+        else this.notifyHanafudaTurn();
+      }
+    }
   }
 
   /**
    * 「重新开始」前的结算归档:未完对局作废(settle 模型下未划账的注额不动,
    * 筹码不清零),按筹码把这场记进场次档案,只清该游戏的进度——其他游戏互不干涉。
    */
-  private archiveSession(game: 'blackjack' | 'oldmaid' | 'holdem'): void {
+  private archiveSession(game: 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda'): void {
     const mt = this.mt();
     const state = this.state!;
     const bj = state.blackjack;
     const om = state.oldmaid;
     const hm = state.holdem;
+    const hf = state.hanafuda;
     const played = game === 'blackjack' && bj ? Math.max(0, bj.round - 1)
       : game === 'holdem' && hm ? Math.max(0, hm.round - 1)
-        : game === 'oldmaid' && om ? om.score.ai + om.score.player : 0;
+        : game === 'hanafuda' && hf ? Math.max(0, hf.round - 1)
+          : game === 'oldmaid' && om ? om.score.ai + om.score.player : 0;
     // 筹码按游戏分开:归档用这个游戏自己的座位(全局座位可能属于另一个游戏)。
     const seats = state.seatsOwner === game
       ? { ai: state.ai, player: state.player }
@@ -1049,8 +1261,9 @@ export class CasinoWorld implements World {
     saveMatches(this.opts.dataDir, this.matches);
     if (game === 'blackjack') state.blackjack = null;
     else if (game === 'oldmaid') state.oldmaid = null;
+    else if (game === 'hanafuda') state.hanafuda = null;
     else state.holdem = null;
-    const gameName = game === 'blackjack' ? 'blackjack' : game === 'oldmaid' ? 'Old Maid' : 'Texas Hold\'em';
+    const gameName = game === 'blackjack' ? 'blackjack' : game === 'oldmaid' ? 'Old Maid' : game === 'hanafuda' ? 'Hanafuda' : 'Texas Hold\'em';
     void this.host?.pushEvent({
       type: 'casino.action',
       ts: nowIso(this.opts.timezone),
@@ -1072,6 +1285,7 @@ export class CasinoWorld implements World {
     if (name === 'casino_online') return await this.toolOnline(args);
     if (name === 'oldmaid_draw') return await this.toolOldMaidDraw();
     if (name === 'holdem_act') return await this.toolHoldemAct(args);
+    if (name === 'hanafuda_act') return await this.toolHanafudaAct(args);
     return `Unknown tool ${name}.`;
   }
 
@@ -1109,6 +1323,12 @@ export class CasinoWorld implements World {
         );
         out.push(mt.holdemHistoryTitle(lines.length), ...lines);
       }
+      if (state.hanafuda && state.hanafuda.history.length) {
+        const lines = state.hanafuda.history.slice(0, limit).map((r, i) =>
+          mt.hanafudaHistoryLine(i + 1, r.round, r.winner === 'ai' ? mt.matchYouWin : r.winner === 'player' ? mt.matchOwnerWins : mt.matchTie, r.aiScore, r.playerScore),
+        );
+        out.push(mt.hanafudaHistoryTitle(lines.length), ...lines);
+      }
       return out.length ? out.join('\n') : mt.noHistoryYet;
     }
     if (state.game === null) {
@@ -1124,7 +1344,29 @@ export class CasinoWorld implements World {
     if (state.game === 'oldmaid') {
       return this.toolOldMaidStatus(mt, state.oldmaid!);
     }
+    if (state.game === 'hanafuda') {
+      return this.toolHanafudaStatus(mt, state.hanafuda!);
+    }
     return this.toolHoldemStatus(mt, state.holdem!);
+  }
+
+  /** 花札状态(casino_table 的 hanafuda 分支):轮到谁、双方役分、手牌与场牌、山札。 */
+  private toolHanafudaStatus(mt: ModelText, h: HanafudaState): string {
+    const state = this.state!;
+    const turnText = h.matchOver
+      ? mt.hanafudaMatchDone(h.matchScores.ai, h.matchScores.player)
+      : h.phase === 'decide'
+        ? h.turnOwner === 'ai' ? mt.hanafudaStatusDecideYou : mt.hanafudaStatusDecideOwner
+        : h.turnOwner === 'ai' ? mt.hanafudaStatusTurnYou : mt.hanafudaStatusTurnOwner;
+    const lines = [
+      `${mt.statusGameHanafuda} ${mt.hanafudaStatusHead(h.round, this.opts.cfg.hanafudaRounds)} ${turnText}`,
+      mt.hanafudaStatusScore(h.aiScore, h.playerScore, h.matchScores.ai, h.matchScores.player),
+      mt.hanafudaStatusCounts(h.aiCollect.light.length, h.aiCollect.tane.length, h.aiCollect.tan.length, h.aiCollect.kasu.length, h.playerCollect.light.length, h.playerCollect.tane.length, h.playerCollect.tan.length, h.playerCollect.kasu.length),
+      mt.hanafudaStatusHands(this.cards(h.aiHand.map((c) => ({ rank: c.rank, suit: c.suit }))), h.playerHand.length, h.field.length, h.deck.length),
+    ];
+    if (h.newYaku.length) lines.push(mt.hanafudaStatusYaku(h.newYaku.join(' · ')));
+    lines.push(mt.hanafudaStatusChips(state.ai.chips, state.player.chips));
+    return lines.join('\n');
   }
 
   private toolBlackjackStatus(mt: ModelText, bj: BlackjackState): string {
@@ -1421,6 +1663,89 @@ export class CasinoWorld implements World {
       } };
     }
 
+    if (session.game === 'hanafuda') {
+      const hf = engine as RemoteHanafuda;
+      /** 协议牌名文本(A♠)→ 渲染用的 rank/suit(id 恒 0:同月同类的粕观感一致)。 */
+      const parseCards = (text: string | undefined): Array<{ r: number; s: number; id: number }> => {
+        if (!text || text === 'none') return [];
+        return text.split(',').filter(Boolean).map((t) => {
+          const s = ({ '♠': 0, '♥': 1, '♣': 2, '♦': 3 } as Record<string, number>)[t.slice(0, 1)] ?? 0;
+          const rankText = t.slice(1);
+          const r = /^\d+$/.test(rankText) ? Number(rankText) : ({ A: 1, J: 11, Q: 12 } as Record<string, number>)[rankText] ?? 1;
+          return { r, s, id: 0 };
+        });
+      };
+      const collectView = (names: string) => {
+        const list = names && names !== 'none' ? names.split(',').filter(Boolean) : [];
+        const kindOf = (t: string) => (({ '♠': 'light', '♥': 'tane', '♣': 'kasu', '♦': 'tan' } as Record<string, string>)[t.slice(0, 1)] ?? 'kasu');
+        const view: HanafudaCollect = { light: [], tane: [], tan: [], kasu: [] };
+        // 显示名用真实役牌名(松上鹤…),而不是协议牌码(♦3)——主人实测客座收集区显示成花色符号的修复。
+        const parse = parseCards(list.join(','));
+        for (let i = 0; i < list.length; i++) {
+          const t = list[i]!;
+          (view as unknown as Record<string, string[]>)[kindOf(t)].push(hanafudaCardName(parse[i]!.r, parse[i]!.s));
+        }
+        return view;
+      };
+      // 观战席位约定(与其余三游戏一致):下方"我"席 = 本机 AI(庄家端=引擎 bank,客座端=kv you),上方"对手"席 = 对方。
+      if (!hf?.state) {
+        // 客座端:kv 视角——自己的手牌明牌在下方席,对手只亮张数与收集区。
+        const kv = session.lastState ?? {};
+        const myHand = parseCards(kv.yourHand);
+        return { state: 'active', snapshot: {
+          ...base,
+          game: 'hanafuda',
+          phase: kv.stage === 'pick' ? 'playHand' : kv.stage === 'decide' ? 'decide' : 'playHand',
+          round: session.handsTotal + 1,
+          roundsTotal: this.opts.cfg.hanafudaRounds,
+          turnOwner: kv.turn === 'you' ? 'player' : 'ai',
+          matchOver: false,
+          finalWinner: null,
+          fieldCards: parseCards(kv.field),
+          handCards: myHand,
+          aiHandCount: Number(kv.oppCount ?? 8),
+          deckCount: Number(kv.deck ?? 0),
+          aiCollect: collectView(kv.oppCollect),
+          playerCollect: collectView(kv.myCollect),
+          aiScore: Number(kv.oppScore ?? 0),
+          playerScore: Number(kv.myScore ?? 0),
+          matchScores: { ai: 0, player: 0 },
+          pickOwner: kv.stage === 'pick' ? (kv.turn === 'you' ? 'player' : 'ai') : null,
+          newYaku: (kv.newYaku && kv.newYaku !== 'none') ? String(kv.newYaku).split('·') : [],
+          hanafudaHistory: [],
+        } };
+      }
+      const st = hf.state;
+      const myView = (cards: HanaCard[]) => cards.map((x) => ({ r: x.rank, s: x.suit, id: x.id }));
+      const collectViewOf = (who: 'bank' | 'player') => {
+        const c = who === 'bank' ? st.bankCollect : st.playerCollect;
+        return { light: c.light.map((x) => hanafudaCardName(x.rank, x.suit)), tane: c.tane.map((x) => hanafudaCardName(x.rank, x.suit)), tan: c.tan.map((x) => hanafudaCardName(x.rank, x.suit)), kasu: c.kasu.map((x) => hanafudaCardName(x.rank, x.suit)) };
+      };
+      // 席位约定(两台机器一致):下方"player"席 = 客座(引擎 player 侧),上方"ai"席 = 庄家(引擎 bank 侧)。
+      return { state: 'active', snapshot: {
+        ...base,
+        game: 'hanafuda',
+        phase: st.pickOwner ? 'playHand' : st.phase === 'decide' ? 'decide' : 'playHand',
+        round: session.handsTotal + 1,
+        roundsTotal: this.opts.cfg.hanafudaRounds,
+        turnOwner: st.turn === 'player' ? 'player' : 'ai',
+        matchOver: false,
+        finalWinner: null,
+        fieldCards: myView(st.field),
+        handCards: myView(st.playerHand),
+        aiHandCount: st.bankHand.length,
+        deckCount: st.deck.length,
+        aiCollect: collectViewOf('bank'),
+        playerCollect: collectViewOf('player'),
+        aiScore: st.bankScore,
+        playerScore: st.playerScore,
+        matchScores: { ai: 0, player: 0 },
+        pickOwner: st.pickOwner ? (st.pickOwner === 'player' ? 'player' : 'ai') : null,
+        newYaku: st.newYaku,
+        hanafudaHistory: [],
+      } };
+    }
+
     const hd = engine as RemoteHoldem;
     if (!hd?.state) {
       // 客座端:无权威引擎,用缓存的 state kv 构建完整视角(自己的底牌可见,对方的只见张数)。
@@ -1535,7 +1860,8 @@ export class CasinoWorld implements World {
         sp.friendsCache.fetchedAt = Date.now();
       }).catch((e) => { sp.lastError = (e as Error).message; });
     }
-    const ONLINE_WINDOW_MS = 10 * 60 * 1000;
+    // 在线窗口 3 分钟(心跳 2 分钟一轮,稳态内必命中);对端下线后 3 分钟即判离线,比旧 10 分钟灵敏。
+    const ONLINE_WINDOW_MS = 3 * 60 * 1000;
     const friends = (sp.friendsCache?.list ?? []).filter((f) => f.bot).map((f) => {
       const last = sp.activity[f.id] ?? 0;
       const online = now - last < ONLINE_WINDOW_MS;
@@ -1543,7 +1869,7 @@ export class CasinoWorld implements World {
         id: f.id,
         nickname: f.nickname || f.id,
         online,
-        inGame: Boolean(session && session.peer === f.id),
+        inGame: Boolean(session && session.peer === f.id) || (sp.peerPresence[f.id]?.ingame && now - sp.peerPresence[f.id]!.at < 3 * 60 * 1000),
       };
     });
     // 排序:对局中 > 在线 > 离线;同段内按昵称。
@@ -1580,8 +1906,9 @@ export class CasinoWorld implements World {
             // 主人规则的自动化解:AI 想玩同一个游戏却撞上对方的待回应邀约 → 自动改为接受对方邀约,
             // 牌局照样开起来(不再出现"发不出去也回不了"的死端)。
             if (incoming.game === game) {
-              await sp.client.sendPrivate(target, composeOnlineMessage('accept', incoming.game));
+              await this.onlineSend(target, composeOnlineMessage('accept', incoming.game));
               incoming.status = 'accepted';
+              this.stallWatchdog(target, incoming.game); // 对方没在 15 秒内开局则本机接管坐庄
               return JSON.stringify({ autoAccepted: true, game: incoming.game, target, note: `你与 ${target} 的邀约撞车了:已自动改为接受对方的 ${incoming.game} 邀约,对方(首任庄家)将开局。` });
             }
             return JSON.stringify({ error: `你有一封来自 ${target} 的待回应邀约(${incoming.game})。先决定 accept 或 decline,再发起新邀约。`, blockedBy: target, blockedGame: incoming.game });
@@ -1602,8 +1929,9 @@ export class CasinoWorld implements World {
           }
           const pending = sp.invites.find((i) => i.direction === 'in' && i.peer === target && i.status === 'pending');
           if (!pending) return JSON.stringify({ error: `没有来自 ${target} 的待回应邀约。` });
-          await sp.client.sendPrivate(target, composeOnlineMessage('accept', pending.game));
+          await this.onlineSend(target, composeOnlineMessage('accept', pending.game));
           pending.status = 'accepted';
+          this.stallWatchdog(target, pending.game); // accept 丢失或对端未接住 → 15 秒后本机接管坐庄(双方互等死锁兜底)
           return JSON.stringify({ accepted: true, game: pending.game, target, note: '意向已互认,对方(首任庄家)将开局;对局状态以事件通知你,你的动作用 casino_online act 发送。' });
         }
         case 'decline': {
@@ -1625,18 +1953,23 @@ export class CasinoWorld implements World {
           const session = sp.session;
           if (!session) return JSON.stringify({ error: '当前没有联机会话。' });
           const act = String(args.act ?? '').toLowerCase();
-          const validActs = session.game === 'blackjack' ? ['bet', 'hit', 'stand', 'double'] : session.game === 'oldmaid' ? ['draw'] : ['fold', 'check', 'call', 'bet', 'raise'];
+          const validActs = session.game === 'blackjack' ? ['bet', 'hit', 'stand', 'double']
+            : session.game === 'oldmaid' ? ['draw']
+              : session.game === 'hanafuda' ? ['play', 'pick', 'koikoi', 'yame']
+                : ['fold', 'check', 'call', 'bet', 'raise'];
           if (!validActs.includes(act)) return JSON.stringify({ error: `${session.game} 的动作集:${validActs.join('/')}` });
           // 闲家的自动抽牌失败时,AI 的手动 draw 是兜底通道——允许发送(重复抽会被庄家温和拒绝,无副作用)。
           if (act === 'bet' && !Number.isSafeInteger(Number(args.amount))) return JSON.stringify({ error: 'bet 需要整数金额(amount)' });
+          if ((act === 'play' || act === 'pick') && !Number.isSafeInteger(Number(args.index))) return JSON.stringify({ error: 'play/pick 需要整数序号(index,从 0 起)' });
           // 我是庄家:动作直接落本地引擎;否则发协议给庄家。
           if (session.bank === this.myBotId() && session.engine) {
             const at = nowIso(this.opts.timezone);
             if (session.game === 'blackjack') await this.bankApplyBlackjackAct(session, session.engine as RemoteBlackjack, act, [act, ...(act === 'bet' ? [String(args.amount)] : [])], at);
             else if (session.game === 'holdem') await this.bankApplyHoldemAct(session, session.engine as RemoteHoldem, act, act === 'bet' || act === 'raise' ? String(args.amount ?? '') : undefined, at, 'bank');
+            else if (session.game === 'hanafuda') await this.bankApplyHanafudaAct(session, session.engine as RemoteHanafuda, act, act === 'play' || act === 'pick' ? String(args.index ?? '') : undefined, at);
             return JSON.stringify({ applied: true, act, note: '动作已落到庄家引擎;结果以事件返回。' });
           }
-          const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : [])];
+          const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : act === 'play' || act === 'pick' ? [String(args.index ?? '')] : [])];
           try {
             await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
             session.sendFails = 0;
@@ -2662,6 +2995,406 @@ export class CasinoWorld implements World {
     return line;
   }
 
+  // ---------------------------------------------------------------- 花札(こいこい)
+
+  /** 花札役识别配置:按部署配置选流派预设(热改:下一局生效)。 */
+  private hanafudaYakuOpts(): YakuOptions {
+    return this.opts.cfg.hanafudaNintendo ? YAKU_PRESET_NINTENDO : YAKU_PRESET_FUDAWIKI;
+  }
+
+  /** 开一场花札:第一局玩家先手,之后每局轮换;选卡后直接发第一局。 */
+  private startHanafuda(): void {
+    const state = this.state!;
+    state.game = 'hanafuda';
+    state.hanafuda = newHanafudaState('player');
+    this.dealHanafudaRound();
+  }
+
+  /** 花札双方的收集区。 */
+  private hanafudaCollectOf(h: HanafudaState, who: 'ai' | 'player'): HanafudaCollect {
+    return who === 'ai' ? h.aiCollect : h.playerCollect;
+  }
+
+  /** 花札双方的手牌。 */
+  private hanafudaHandOf(h: HanafudaState, who: 'ai' | 'player'): HanaCard[] {
+    return who === 'ai' ? h.aiHand : h.playerHand;
+  }
+
+  /** 把收到的牌按类别归入收集区(纯归类,役分由 evaluateYaku 全量重算)。 */
+  private hanafudaTake(collect: HanafudaCollect, card: HanaCard): void {
+    if (card.suit === HANAFUDA_LIGHT) collect.light.push(card);
+    else if (card.suit === HANAFUDA_TANE) collect.tane.push(card);
+    else if (card.suit === HANAFUDA_TAN) collect.tan.push(card);
+    else collect.kasu.push(card);
+  }
+
+  /** 花札双方的当前役分。 */
+  private hanafudaScoreOf(h: HanafudaState, who: 'ai' | 'player'): number {
+    return who === 'ai' ? h.aiScore : h.playerScore;
+  }
+
+  /** 发一局:整副 48 张洗匀,手牌 8 + 场牌 8 + 山札 32;场牌 4 张同月即流局重发(上限 10 次)。 */
+  private dealHanafudaRound(): void {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.hanafuda!;
+    h.round++;
+    const first: 'ai' | 'player' = h.round % 2 === 1 ? 'player' : 'ai';
+    h.firstMover = first;
+    h.turnOwner = first;
+    h.aiCollect = { light: [], tane: [], tan: [], kasu: [] };
+    h.playerCollect = { light: [], tane: [], tan: [], kasu: [] };
+    h.aiScore = 0;
+    h.playerScore = 0;
+    if (h.round === 1) h.matchScores = { ai: 0, player: 0 };
+    h.turnStartScore = 0;
+    h.aiKoikoi = false;
+    h.playerKoikoi = false;
+    h.winner = null;
+    h.matchOver = false;
+    h.finalWinner = null;
+    h.pickOwner = null;
+    h.pickCards = [];
+    h.pendingCard = null;
+    h.pendingDraw = false;
+    h.newYaku = [];
+    // 花札每局整副新牌;shoe/drawn 是 21 点的靴,花札不共用。
+    let deck = shuffled(freshHanafudaDeck(), this.opts.rng ?? Math.random);
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const field = deck.slice(16, 24);
+      const four = field.some((f) => field.filter((x) => x.rank === f.rank).length === 4);
+      if (!four) break;
+      deck = shuffled(freshHanafudaDeck(), this.opts.rng ?? Math.random);
+    }
+    h.aiHand = deck.slice(0, 8);
+    h.playerHand = deck.slice(8, 16);
+    h.field = deck.slice(16, 24);
+    h.deck = deck.slice(24);
+    h.phase = 'playHand';
+    this.save();
+    this.broadcast();
+    void this.host?.pushEvent({
+      type: 'hanafuda.action',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: mt.hanafudaNewRound(h.round, this.opts.cfg.hanafudaRounds),
+    }, { trigger: 'flush' });
+    if (h.turnOwner === 'ai') this.notifyHanafudaTurn();
+  }
+
+  /** 轮到 AI 打手牌:flush 通知(先 casino_table 看局面,再 hanafuda_act)。 */
+  private notifyHanafudaTurn(): void {
+    void this.host?.pushEvent({
+      type: 'hanafuda.turn',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: this.mt().hanafudaTurnNotify,
+    }, { trigger: 'flush' });
+  }
+
+  /** 轮到 AI 决策(成役后收手还是继续):flush 通知。 */
+  private notifyHanafudaDecide(): void {
+    void this.host?.pushEvent({
+      type: 'hanafuda.turn',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: this.mt().hanafudaDecideNotify,
+    }, { trigger: 'flush' });
+  }
+
+  /** 回合结束:换手、记回合基准役分、判流局;轮到 AI 则叫它。 */
+  private hanafudaEndTurn(h: HanafudaState): string | null {
+    const mt = this.mt();
+    // 流局判定:双方手牌与山札都空且无人收手。
+    if (h.aiHand.length === 0 && h.playerHand.length === 0 && h.deck.length === 0) {
+      return this.settleHanafudaDraw();
+    }
+    const other: 'ai' | 'player' = h.turnOwner === 'ai' ? 'player' : 'ai';
+    h.turnOwner = other;
+    h.turnStartScore = this.hanafudaScoreOf(h, other);
+    h.phase = 'playHand';
+    this.save();
+    this.broadcast();
+    if (h.turnOwner === 'ai') this.notifyHanafudaTurn();
+    return null;
+  }
+
+  /** 打出手牌第 index 张:配场牌(0 张留场 / 1 张收走 / 2 张选一张 / 3 张整摞),随后自动翻山札。 */
+  private hanafudaPlayCard(who: 'ai' | 'player', index: number): string {
+    const mt = this.mt();
+    const h = this.state!.hanafuda!;
+    const hand = this.hanafudaHandOf(h, who);
+    if (index < 0 || index >= hand.length) throw new Error(mt.hanafudaBadIndex(hand.length));
+    const card = hand.splice(index, 1)[0]!;
+    const collect = this.hanafudaCollectOf(h, who);
+    const matched = h.field.filter((f) => f.rank === card.rank);
+    if (matched.length === 2) {
+      // 场同月 2 张:选收哪一张(另一张留场);打出的牌挂起,选完一起收。
+      h.pickOwner = who;
+      h.pickCards = [...matched];
+      h.pendingCard = card;
+      h.pendingDraw = true;
+      h.phase = 'playHand';
+      this.save();
+      this.broadcast();
+      return mt.hanafudaPickPrompt(this.hanafudaCardLabel(matched[0]!), this.hanafudaCardLabel(matched[1]!));
+    }
+    if (matched.length === 1) {
+      h.field.splice(h.field.indexOf(matched[0]!), 1);
+      this.hanafudaTake(collect, card);
+      this.hanafudaTake(collect, matched[0]!);
+    } else {
+      h.field.push(card);
+    }
+    this.hanafudaRefreshScore(h);
+    this.save();
+    this.broadcast();
+    return this.hanafudaDrawPhase(who);
+  }
+
+  /** 翻山札并处理配对;回合末按役分增量决定进决策还是换手。 */
+  private hanafudaDrawPhase(who: 'ai' | 'player'): string {
+    const mt = this.mt();
+    const h = this.state!.hanafuda!;
+    if (h.deck.length > 0) {
+      const card = h.deck.pop()!;
+      const collect = this.hanafudaCollectOf(h, who);
+      const matched = h.field.filter((f) => f.rank === card.rank);
+      if (matched.length === 2) {
+        h.pickOwner = who;
+        h.pickCards = [...matched];
+        h.pendingCard = card;
+        h.pendingDraw = false;
+        this.save();
+        this.broadcast();
+        return mt.hanafudaPickPrompt(this.hanafudaCardLabel(matched[0]!), this.hanafudaCardLabel(matched[1]!));
+      }
+      if (matched.length === 1) {
+        h.field.splice(h.field.indexOf(matched[0]!), 1);
+        this.hanafudaTake(collect, card);
+        this.hanafudaTake(collect, matched[0]!);
+      } else {
+        h.field.push(card);
+      }
+      this.hanafudaRefreshScore(h);
+    }
+    this.save();
+    this.broadcast();
+    return this.hanafudaFinishTurn(who);
+  }
+
+  /** 场牌 2 张的选择:收走所选(与挂起的打出/翻出牌一起),另一张留场;继续被挂起的下一步。 */
+  private hanafudaPick(who: 'ai' | 'player', index: number): string {
+    const h = this.state!.hanafuda!;
+    if (h.pickOwner !== who || !h.pendingCard) throw new Error(this.mt().hanafudaNothingToPick);
+    if (index < 0 || index >= h.pickCards.length) throw new Error(this.mt().hanafudaBadIndex(h.pickCards.length));
+    const chosen = h.pickCards[index]!;
+    const keep = h.pickCards[1 - index]!;
+    h.field = h.field.filter((f) => f !== chosen && f !== keep);
+    h.field.push(keep);
+    const collect = this.hanafudaCollectOf(h, who);
+    this.hanafudaTake(collect, chosen);
+    this.hanafudaTake(collect, h.pendingCard);
+    h.pickOwner = null;
+    h.pickCards = [];
+    const wasDraw = h.pendingDraw;
+    h.pendingCard = null;
+    h.pendingDraw = false;
+    this.hanafudaRefreshScore(h);
+    this.save();
+    this.broadcast();
+    return wasDraw ? this.hanafudaDrawPhase(who) : this.hanafudaFinishTurn(who);
+  }
+
+  /** 回合末:役分比回合开始时有增 → 进决策(こいこい/收手);否则换手。 */
+  private hanafudaFinishTurn(who: 'ai' | 'player'): string {
+    const mt = this.mt();
+    const h = this.state!.hanafuda!;
+    this.hanafudaRefreshScore(h);
+    const now = this.hanafudaScoreOf(h, who);
+    const yaku = evaluateYaku(this.hanafudaCollectAll(h, who), this.hanafudaYakuOpts());
+    if (now > h.turnStartScore && yaku.hits.length > 0) {
+      h.phase = 'decide';
+      h.newYaku = yaku.hits.map((x) => `${x.name} ${x.points}文`);
+      this.save();
+      this.broadcast();
+      if (who === 'ai') this.notifyHanafudaDecide();
+      return mt.hanafudaYakuFormed(h.newYaku.join(' · '), now);
+    }
+    h.newYaku = [];
+    const end = this.hanafudaEndTurn(h);
+    return end ?? mt.hanafudaNoYakuPass;
+  }
+
+  /** 收集区合并(役识别吃扁平列表)。 */
+  private hanafudaCollectAll(h: HanafudaState, who: 'ai' | 'player'): HanaCard[] {
+    const c = this.hanafudaCollectOf(h, who);
+    return [...c.light, ...c.tane, ...c.tan, ...c.kasu];
+  }
+
+  /** 重算双方役分(收集区变化后调用)。 */
+  private hanafudaRefreshScore(h: HanafudaState): void {
+    const opts = this.hanafudaYakuOpts();
+    h.aiScore = evaluateYaku(this.hanafudaCollectAll(h, 'ai'), opts).total;
+    h.playerScore = evaluateYaku(this.hanafudaCollectAll(h, 'player'), opts).total;
+  }
+
+  /** 花札牌的显示名(月名+组合,回执用)。 */
+  private hanafudaCardLabel(card: HanaCard): string {
+    return `${hanafudaCardName(card.rank, card.suit)}(${card.rank === 11 ? 'J' : card.rank === 12 ? 'Q' : card.rank === 1 ? 'A' : String(card.rank)}${['♠', '♥', '♣', '♦'][card.suit]})`;
+  }
+
+  /** こいこい:记继续,换对方行动(被反超则对方收手翻倍)。 */
+  private hanafudaKoikoi(who: 'ai' | 'player'): string {
+    const mt = this.mt();
+    const h = this.state!.hanafuda!;
+    if (h.phase !== 'decide' || h.turnOwner !== who) throw new Error(mt.hanafudaNothingToDecide);
+    if (who === 'ai') h.aiKoikoi = true;
+    else h.playerKoikoi = true;
+    h.phase = 'playHand';
+    h.newYaku = [];
+    const end = this.hanafudaEndTurn(h);
+    if (end) return end;
+    this.save();
+    this.broadcast();
+    return mt.hanafudaKoikoiCalled;
+  }
+
+  /** 收手:结算本局(役分、こいこい 翻倍、七文翻倍),划筹码,进下一局或整场收束。 */
+  private hanafudaStop(who: 'ai' | 'player'): string {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.hanafuda!;
+    if (h.phase !== 'decide' || h.turnOwner !== who) throw new Error(mt.hanafudaNothingToDecide);
+    const opp: 'ai' | 'player' = who === 'ai' ? 'player' : 'ai';
+    const oppKoikoi = opp === 'ai' ? h.aiKoikoi : h.playerKoikoi;
+    // 七文翻倍按"役分本身"判定(通行口径),こいこい翻倍独立相乘——不互相放大。
+    let score = evaluateYaku(this.hanafudaCollectAll(h, who), this.hanafudaYakuOpts()).total;
+    if (this.opts.cfg.hanafudaSevenDouble && score >= 7) score *= 2;
+    if (oppKoikoi) score *= 2;
+    h.winner = who;
+    // 文差划转(settle 模型):收手者赢文,对方同额筹码划出。
+    if (who === 'ai') {
+      state.ai.chips += score;
+      state.player.chips -= score;
+    } else {
+      state.player.chips += score;
+      state.ai.chips -= score;
+    }
+    const record: HanafudaRecord = {
+      at: nowIso(this.opts.timezone),
+      round: h.round,
+      winner: who,
+      aiScore: who === 'ai' ? score : 0,
+      playerScore: who === 'player' ? score : 0,
+      koikoiBy: h.aiKoikoi ? 'ai' : h.playerKoikoi ? 'player' : null,
+    };
+    recordHanafuda(state, record);
+    this.hanafudaAdvance(h, who, score, 'stop');
+    const winnerLabel = who === 'ai' ? mt.matchYouWin : mt.matchOwnerWins;
+    void this.host?.pushEvent({
+      type: 'hanafuda.result',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: mt.hanafudaRoundResult(h.round, winnerLabel, score, h.matchScores.ai, h.matchScores.player, state.ai.chips, state.player.chips),
+    }, { trigger: 'flush' });
+    return mt.hanafudaRoundResult(h.round, winnerLabel, score, h.matchScores.ai, h.matchScores.player, state.ai.chips, state.player.chips);
+  }
+
+  /** 局后推进:累计文、够局数收束整场,否则下一局(先手轮换)。 */
+  private hanafudaAdvance(h: HanafudaState, who: 'ai' | 'player', score: number, by: 'stop' | 'draw'): void {
+    if (by === 'stop') {
+      if (who === 'ai') h.matchScores.ai += score;
+      else h.matchScores.player += score;
+    }
+    if (h.round >= this.opts.cfg.hanafudaRounds) {
+      h.matchOver = true;
+      h.phase = 'over';
+      h.finalWinner = h.matchScores.ai > h.matchScores.player ? 'ai'
+        : h.matchScores.player > h.matchScores.ai ? 'player' : 'draw';
+    } else {
+      this.dealHanafudaRound();
+    }
+    this.save();
+    this.broadcast();
+  }
+
+  /** 流局:双方 0 文,进下一局或收束整场。 */
+  private settleHanafudaDraw(): string {
+    const mt = this.mt();
+    const state = this.state!;
+    const h = state.hanafuda!;
+    h.winner = 'draw';
+    const record: HanafudaRecord = {
+      at: nowIso(this.opts.timezone),
+      round: h.round,
+      winner: 'draw',
+      aiScore: 0,
+      playerScore: 0,
+      koikoiBy: null,
+    };
+    recordHanafuda(state, record);
+    this.hanafudaAdvance(h, 'player', 0, 'draw');
+    const line = mt.hanafudaDrawResult(h.round, h.matchOver ? 1 : 0);
+    void this.host?.pushEvent({
+      type: 'hanafuda.result',
+      ts: nowIso(this.opts.timezone),
+      source: this.id,
+      origin: 'internal',
+      senderKey: this.id,
+      text: line,
+    }, { trigger: 'flush' });
+    return line;
+  }
+
+  /** 面板/AI 共用的花札动作入口。 */
+  private async hanafudaAction(actor: 'ai' | 'player', args: Record<string, unknown>): Promise<OpResult> {
+    const mt = this.mt();
+    const state = this.state!;
+    if (state.game !== 'hanafuda' || !state.hanafuda) return { ok: false, text: mt.noGameYet };
+    const h = state.hanafuda;
+    if (h.matchOver) return { ok: false, text: mt.hanafudaMatchOver };
+    const action = String(args.action ?? '');
+    if (h.pickOwner && action !== 'pick') return { ok: false, text: mt.hanafudaNothingToPick };
+    if (action === 'play') {
+      if (h.phase !== 'playHand') return { ok: false, text: mt.hanafudaNotYourPhase };
+      if (h.turnOwner !== actor) return { ok: false, text: mt.hanafudaNotYourTurn };
+      const index = Math.floor(Number(args.index ?? -1));
+      if (!Number.isInteger(index)) return { ok: false, text: mt.hanafudaBadIndex(this.hanafudaHandOf(h, actor).length) };
+      return { ok: true, text: this.hanafudaPlayCard(actor, index) };
+    }
+    if (action === 'pick') {
+      if (h.pickOwner !== actor) return { ok: false, text: mt.hanafudaNothingToPick };
+      const index = Math.floor(Number(args.index ?? -1));
+      if (!Number.isInteger(index)) return { ok: false, text: mt.hanafudaBadIndex(h.pickCards.length) };
+      return { ok: true, text: this.hanafudaPick(actor, index) };
+    }
+    if (action === 'koikoi') {
+      if (h.phase !== 'decide' || h.turnOwner !== actor) return { ok: false, text: mt.hanafudaNothingToDecide };
+      return { ok: true, text: this.hanafudaKoikoi(actor) };
+    }
+    if (action === 'stop') {
+      if (h.phase !== 'decide' || h.turnOwner !== actor) return { ok: false, text: mt.hanafudaNothingToDecide };
+      return { ok: true, text: this.hanafudaStop(actor) };
+    }
+    return { ok: false, text: mt.hanafudaUnknownAct };
+  }
+
+  /** AI 工具入口(hanafuda_act)。 */
+  private toolHanafudaAct(args: Record<string, unknown>): Promise<string> {
+    const state = this.state!;
+    if (state.game !== 'hanafuda' || !state.hanafuda) return Promise.resolve(this.mt().noGameYet);
+    return this.hanafudaAction('ai', args).then((r) => r.text);
+  }
+
   // ---------------------------------------------------------------- 面板
 
   private async handleInvoke(panel: string, method: string, args: unknown[]): Promise<unknown> {
@@ -2687,10 +3420,10 @@ export class CasinoWorld implements World {
     }
     if (action === 'newgame') {
       const game = String(arg.game ?? '');
-      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);
+      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem' && game !== 'hanafuda') throw new Error(mt.errNewgameKind);
       if (state.game !== null) throw new Error(mt.handNotFinished);
       // 该游戏有挂起的未完对局(面板弹框里主人选了「重新开始」):先作废归档再开新局。
-      if (this.pausedGames().includes(game as 'blackjack' | 'oldmaid' | 'holdem')) this.archiveSession(game as 'blackjack' | 'oldmaid' | 'holdem');
+      if (this.pausedGames().includes(game as 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda')) this.archiveSession(game as 'blackjack' | 'oldmaid' | 'holdem' | 'hanafuda');
       if (game === 'blackjack') {
         const dealer = String(arg.dealer ?? '');
         if (dealer !== 'ai' && dealer !== 'player') throw new Error(mt.errNewgameDealerArg);
@@ -2707,23 +3440,29 @@ export class CasinoWorld implements World {
         this.startHoldem();
         return this.snapshot();
       }
+      if (game === 'hanafuda') {
+        this.freshSeatsFor('hanafuda');
+        this.startHanafuda();
+        return this.snapshot();
+      }
       this.startOldMaid();
       return this.snapshot();
     }
     if (action === 'resume') {
       // 面板弹框「继续上一局」:把挂起的对局重新设为活动,恢复到离开时的样子。
       const game = String(arg.game ?? '');
-      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem') throw new Error(mt.errNewgameKind);
+      if (game !== 'blackjack' && game !== 'oldmaid' && game !== 'holdem' && game !== 'hanafuda') throw new Error(mt.errNewgameKind);
       if (state.game !== null) throw new Error(mt.handNotFinished);
       const paused: Record<string, unknown | null> = {
         blackjack: state.blackjack,
         oldmaid: state.oldmaid && !state.oldmaid.winner ? state.oldmaid : null,
         holdem: state.holdem,
+        hanafuda: state.hanafuda && !state.hanafuda.matchOver ? state.hanafuda : null,
       };
       if (!paused[game]) throw new Error(mt.errNothingToResume);
       state.game = game as TableState['game'];
       // 筹码按游戏分开:换回这个游戏的座位(原样续,不清不变)。
-      if (game === 'blackjack' || game === 'holdem') this.loadSeatsFor(game);
+      if (game === 'blackjack' || game === 'holdem' || game === 'hanafuda') this.loadSeatsFor(game);
       this.save();
       this.broadcast();
       await this.resumeActiveGame();
@@ -2738,6 +3477,13 @@ export class CasinoWorld implements World {
       this.broadcast();
       return this.snapshot();
     }
+    if (action === 'againHanafuda') {
+      // 再来一场:整场打完的花札,筹码以初始值重起(该游戏自己的座位)。
+      if (state.game !== 'hanafuda' || !state.hanafuda?.matchOver) throw new Error(mt.errAgainOnlyFinished);
+      this.freshSeatsFor('hanafuda');
+      this.startHanafuda();
+      return this.snapshot();
+    }
     if (action === 'leave') {
       // 返回大厅:对局挂起而非作废——再开同一游戏时面板会问「继续还是重新开始」。
       // settle 模型下筹码全程未动账,挂起无损;异步中段(庄家打牌/发牌)不允许中途离开。
@@ -2748,7 +3494,7 @@ export class CasinoWorld implements World {
       const leaving = state.game;
       state.game = null;
       // 离开前把当前座位存回所属游戏的槽位(筹码保持离开时的样子)。
-      if (leaving === 'blackjack' || leaving === 'holdem') {
+      if (leaving === 'blackjack' || leaving === 'holdem' || leaving === 'hanafuda') {
         state.seatsOwner = leaving;
         this.stashSeats();
       }
@@ -2842,6 +3588,13 @@ export class CasinoWorld implements World {
       this.notifyOldMaidTurn();
       return this.snapshot();
     }
+    // ── 花札动作(面板与 AI 工具共用 hanafudaAction) ──
+    const hanafudaActMap: Record<string, string> = { hanafudaPlay: 'play', hanafudaPick: 'pick', hanafudaKoikoi: 'koikoi', hanafudaStop: 'stop' };
+    if (hanafudaActMap[action]) {
+      const result = await this.hanafudaAction('player', { ...arg, action: hanafudaActMap[action] });
+      if (!result.ok) throw new Error(result.text);
+      return this.snapshot();
+    }
     throw new Error(mt.errUnknownActionPanel(action));
   }
 
@@ -2894,6 +3647,7 @@ export class CasinoWorld implements World {
       gameChips: {
         blackjack: state.gameSeats.blackjack && { ai: state.gameSeats.blackjack.ai.chips, player: state.gameSeats.blackjack.player.chips },
         holdem: state.gameSeats.holdem && { ai: state.gameSeats.holdem.ai.chips, player: state.gameSeats.holdem.player.chips },
+        hanafuda: state.gameSeats.hanafuda && { ai: state.gameSeats.hanafuda.ai.chips, player: state.gameSeats.hanafuda.player.chips },
       },
       ai: seatView(state.ai),
       player: seatView(state.player),
@@ -2901,6 +3655,12 @@ export class CasinoWorld implements World {
       maxBet: this.opts.cfg.maxBet,
       startChips: this.opts.cfg.startChips,
       dealerHitsSoft17: this.opts.cfg.dealerHitsSoft17,
+      /** 花札役分的流派值(役种表浮层显示用;按配置现算)。 */
+      hanafudaScores: {
+        five: this.opts.cfg.hanafudaNintendo ? YAKU_PRESET_NINTENDO.fiveLight : YAKU_PRESET_FUDAWIKI.fiveLight,
+        four: this.opts.cfg.hanafudaNintendo ? YAKU_PRESET_NINTENDO.fourLight : YAKU_PRESET_FUDAWIKI.fourLight,
+        three: this.opts.cfg.hanafudaNintendo ? YAKU_PRESET_NINTENDO.threeLight : YAKU_PRESET_FUDAWIKI.threeLight,
+      },
       matches: this.matches,
     };
     if (state.game === 'blackjack' && state.blackjack) {
@@ -2982,6 +3742,41 @@ export class CasinoWorld implements World {
         playerAllIn: h.player.allIn,
         lastHoldem: h.history[0] ?? null,
         holdemHistory: h.history.slice(0, 10),
+      };
+    }
+    if (state.game === 'hanafuda' && state.hanafuda) {
+      const h = state.hanafuda;
+      // 花札手牌对 AI 是公开的(它自己的),对主人的快照只发主人的手牌;收集区双方公开。
+      const collectView = (c: HanafudaCollect) => ({
+        light: c.light.map((x) => hanafudaCardName(x.rank, x.suit)),
+        tane: c.tane.map((x) => hanafudaCardName(x.rank, x.suit)),
+        tan: c.tan.map((x) => hanafudaCardName(x.rank, x.suit)),
+        kasu: c.kasu.map((x) => hanafudaCardName(x.rank, x.suit)),
+      });
+      return {
+        ...base,
+        game: 'hanafuda',
+        phase: h.phase,
+        round: h.round,
+        roundsTotal: this.opts.cfg.hanafudaRounds,
+        turnOwner: h.turnOwner,
+        matchOver: h.matchOver,
+        finalWinner: h.finalWinner,
+        winner: h.winner,
+        fieldCards: h.field.map((x) => ({ r: x.rank, s: x.suit, id: x.id })),
+        handCards: h.playerHand.map((x) => ({ r: x.rank, s: x.suit, id: x.id })),
+        aiHandCount: h.aiHand.length,
+        deckCount: h.deck.length,
+        aiCollect: collectView(h.aiCollect),
+        playerCollect: collectView(h.playerCollect),
+        aiScore: h.aiScore,
+        playerScore: h.playerScore,
+        matchScores: h.matchScores,
+        aiKoikoi: h.aiKoikoi,
+        playerKoikoi: h.playerKoikoi,
+        pickOwner: h.pickOwner,
+        newYaku: h.newYaku,
+        hanafudaHistory: h.history.slice(0, 10),
       };
     }
     // 空桌,或刚结束的对局(牌面留在桌上)。

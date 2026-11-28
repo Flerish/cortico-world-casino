@@ -34,6 +34,12 @@ export interface CasinoConfigSection {
   onlineRestAfterHands: number;
   /** 联机对局:长休时长毫秒,休完自动询问双方是否继续。 */
   onlineRestMs: number;
+  /** 花札:一场打多少局(3/6/12);文数按局累计比总分。热改:下一局生效。 */
+  hanafudaRounds: number;
+  /** 花札:役分用 Nintendo 口径(五光 10/四光 7/三光 5);false = fudawiki 口径(15/8/6,默认)。热改:下一局生效。 */
+  hanafudaNintendo: boolean;
+  /** 花札:收手分数 7 文以上翻倍(通行规则);false = 按原分计。热改:下一局生效。 */
+  hanafudaSevenDouble: boolean;
 }
 
 export const CASINO_DEFAULTS: CasinoConfigSection = {
@@ -53,6 +59,9 @@ export const CASINO_DEFAULTS: CasinoConfigSection = {
   onlineGapMs: 10000,
   onlineRestAfterHands: 10,
   onlineRestMs: 300000,
+  hanafudaRounds: 3,
+  hanafudaNintendo: false,
+  hanafudaSevenDouble: true,
 };
 
 const TEXT = {
@@ -73,6 +82,9 @@ const TEXT = {
     onlineGapMs: { title: '联机局间间隔(毫秒)', description: 'AI 对战时每两局之间的停顿,默认 10 秒;0 = 不停顿(不建议)。' },
     onlineRestAfterHands: { title: '联机长休手数', description: '连续打满这么多手后进入长休;0 = 不自动长休。' },
     onlineRestMs: { title: '联机长休时长(毫秒)', description: '长休持续的时间,休完自动继续;默认 5 分钟。' },
+    hanafudaRounds: { title: '花札局数', description: '一场花札打多少局(3/6/12),按局比总分;默认 3 局短局制。' },
+    hanafudaNintendo: { title: '花札役分 Nintendo 口径', description: '开 = 五光 10/四光 7/三光 5;关(默认)= fudawiki 口径 五光 15/四光 8/三光 6。' },
+    hanafudaSevenDouble: { title: '花札七文翻倍', description: '开(默认)= 收手分数 7 文以上翻倍;关 = 按原分计。' },
   },
   en: {
     title: 'Moonlit Table',
@@ -91,6 +103,9 @@ const TEXT = {
     onlineGapMs: { title: 'Online inter-hand gap (ms)', description: 'Pause between hands during AI-vs-AI play, default 10s; 0 = no pause (not recommended).' },
     onlineRestAfterHands: { title: 'Online hands before rest', description: 'After this many consecutive hands the session takes a long break; 0 = never.' },
     onlineRestMs: { title: 'Online rest duration (ms)', description: 'How long the long break lasts before resuming; default 5 minutes.' },
+    hanafudaRounds: { title: 'Hanafuda rounds', description: 'Rounds per Hanafuda match (3/6/12), scored by total points; default 3.' },
+    hanafudaNintendo: { title: 'Hanafuda Nintendo scoring', description: 'On = five lights 10 / four 7 / three 5; off (default) = fudawiki 15/8/6.' },
+    hanafudaSevenDouble: { title: 'Hanafuda 7-point doubling', description: 'On (default) = scores of 7+ points double; off = face value.' },
   },
 } as const;
 
@@ -210,6 +225,26 @@ export function casinoConfigGroup(language: Language): ConfigGroup {
           description: t.onlineRestMs.description,
           minimum: 1000,
           maximum: 3600000,
+          'x-hot': true,
+        },
+        'worlds.casino.hanafudaRounds': {
+          type: 'number',
+          title: t.hanafudaRounds.title,
+          description: t.hanafudaRounds.description,
+          minimum: 1,
+          maximum: 12,
+          'x-hot': true,
+        },
+        'worlds.casino.hanafudaNintendo': {
+          type: 'boolean',
+          title: t.hanafudaNintendo.title,
+          description: t.hanafudaNintendo.description,
+          'x-hot': true,
+        },
+        'worlds.casino.hanafudaSevenDouble': {
+          type: 'boolean',
+          title: t.hanafudaSevenDouble.title,
+          description: t.hanafudaSevenDouble.description,
           'x-hot': true,
         },
       },
