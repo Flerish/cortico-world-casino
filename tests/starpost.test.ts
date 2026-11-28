@@ -605,6 +605,19 @@ describe('双 world 联机对局(主机权威)', () => {
     }
     expect(hostFake.events.some((e) => e.type === 'casino.online_result')).toBe(true);
     expect(guestFake.events.some((e) => e.type === 'casino.online_result')).toBe(true);
+    // 分数播报一致性(回归:胜负文案曾与筹码数字相反):庄家端"我赢/我输"必须与筹码增量同向
+    // (筹码跨手累计,所以拿上一条结算的快照做基准,而不是拿对方比)。
+    for (const fake of [hostFake, guestFake]) {
+      let prevMine = 1000; // startChips
+      for (const e of fake.events.filter((x) => x.type === 'casino.online_result')) {
+        const mine = Number((e.text.match(/会话筹码 我 (\d+)/) ?? [])[1]);
+        if (Number.isNaN(mine)) continue; // 客座版式(庄家 x / 你 y)不参与本校验
+        if (e.text.includes('我赢')) expect(mine).toBeGreaterThan(prevMine);
+        else if (e.text.includes('我输')) expect(mine).toBeLessThan(prevMine);
+        else expect(mine).toBe(prevMine);
+        prevMine = mine;
+      }
+    }
     await host.stop();
     await guest.stop();
   }, 60000);

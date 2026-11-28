@@ -829,8 +829,10 @@ export class CasinoWorld implements World {
     }
     const s2 = engine.lastSettle!;
     const bankIsMe = session.bank === this.myBotId();
-    const myDelta = bankIsMe ? (s2.winner === 'bank' ? -s2.delta : s2.winner === 'player' ? s2.delta : 0) : (s2.winner === 'player' ? -s2.delta : s2.winner === 'bank' ? s2.delta : 0);
-    const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'player') === bankIsMe ? '我赢' : '我输');
+    // 协议/引擎 delta 一律是"客座(player 侧)"视角:player 赢为正。本机在庄家位时自己的得失是 -delta。
+    // 胜负文案同口径(修复前写反:庄家赢 6 文却播报"我输 6",与筹码数字自相矛盾——主人 AI 反馈的分数问题)。
+    const myDelta = bankIsMe ? -s2.delta : s2.delta;
+    const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'bank') === bankIsMe ? '我赢' : '我输');
     this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
     session.handsTotal++;
     this.bankScheduleNext();
@@ -1179,7 +1181,9 @@ export class CasinoWorld implements World {
         const reason = (() => { try { return decodeURIComponent(kv.reason ?? ''); } catch { return kv.reason ?? ''; } })();
         const chips = (kv.chips ?? '?:?').split(':');
         const delta = Number(kv.delta ?? 0);
-        push('casino.online_result', `[星邮联机] 第 ${kv.hands ?? '?'} 手结算(${reason}):你${delta >= 0 ? '赢' : '输'} ${Math.abs(delta)}。会话筹码 庄家 ${chips[0]} / 你 ${chips[1]}。稍候庄家轮换发新手。`);
+        // 客座视角 delta:正=你赢。流局/平局(result=push)要说平局,而不是"你赢 0"。
+        const outcome = kv.result === 'push' ? '平局,筹码不动' : `你${delta >= 0 ? '赢' : '输'} ${Math.abs(delta)}`;
+        push('casino.online_result', `[星邮联机] 第 ${kv.hands ?? '?'} 手结算(${reason}):${outcome}。会话筹码 庄家 ${chips[0]} / 你 ${chips[1]}。稍候庄家轮换发新手。`);
         return;
       }
       case 'handoff': {
