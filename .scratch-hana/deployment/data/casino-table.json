@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "game": null,
+  "blackjack": null,
+  "oldmaid": null,
+  "holdem": null,
+  "hanafuda": null,
+  "ai": {
+    "chips": 1000,
+    "wins": 0,
+    "losses": 0,
+    "pushes": 0,
+    "net": 0,
+    "bankruptcies": 0
+  },
+  "player": {
+    "chips": 1000,
+    "wins": 0,
+    "losses": 0,
+    "pushes": 0,
+    "net": 0,
+    "bankruptcies": 0
+  },
+  "shoe": [],
+  "drawn": 0,
+  "gameSeats": {},
+  "seatsOwner": null
+}

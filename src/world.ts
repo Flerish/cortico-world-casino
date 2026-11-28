@@ -688,6 +688,9 @@ export class CasinoWorld implements World {
     }
     sp.session = null;
     (session as OnlineSessionShape & { closed?: boolean }).closed = true; // 重发循环据此退场,防止向已终止对端续发
+    // 退出后立即向对端广播一次空闲 ping:friend 列表的"对局中"黄点靠 peerPresence 刷新,
+    // 否则要等下一个心跳周期(旧 8 分钟),对端面板长时间显示"游戏中"(主人实测)。
+    void this.onlineSend(session.peer, onlineLine('ping', ['ingame=0'])).catch(() => {});
     console.log(`[casino] 会话结束(${reason}):庄家=${session.bank} 对手=${session.peer}`);
     this.onlineEvent('casino.online_session', session.peer, `[星邮联机] ${session.game} 会话结束(${reason})。牌桌回到本地模式。`, nowIso(this.opts.timezone));
   }
@@ -897,6 +900,22 @@ export class CasinoWorld implements World {
     }
   }
 
+  /** 客座自动动作(花札/抽鬼牌):发送 + 8 秒自愈——若届时仍轮到自己(动作在途丢失,
+   *  而庄家要收到动作才会发下一条 state,否则双等待死锁),按最新 kv 重算并重发(最多 3 次)。 */
+  private guestAutoAct(session: OnlineSessionShape, peer: string, auto: string[], tries = 3): void {
+    void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {});
+    if (tries <= 0) return;
+    const t = setTimeout(() => {
+      const s2 = this.starpost?.session;
+      if (!s2 || s2 !== session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return;
+      const kv = s2.lastState;
+      if (!kv || kv.turn !== 'you' || (s2.game === 'hanafuda' && kv.stage === 'done')) return; // 局面已前进:动作生效
+      const next = s2.game === 'hanafuda' ? this.hanafudaAutoAction(kv) : s2.game === 'oldmaid' ? ['draw'] : null;
+      if (next) { console.log(`[casino] 客座自动动作自愈重发:${next.join(' ')}`); this.guestAutoAct(s2, s2.peer, next, tries - 1); }
+    }, 8000);
+    session.timers.push(t);
+  }
+
   /** 花札客座自动决策(联机延迟修复):按本地策略生成协议动作,LLM 只在事件里点评。
    *  kv 来自庄家的 state:yourHand/field/pickCards(牌名文本)、myScore/oppScore。 */
   private hanafudaAutoAction(kv: Record<string, string>): string[] {
@@ -1048,7 +1067,7 @@ export class CasinoWorld implements World {
           const myTurn = kv.turn === 'you';
           const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
           push('casino.online_state', `[星邮联机] 新一局花札开始(第 ${session.handsTotal + 1} 局):役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${myTurn ? '打牌等动作会自动执行;成役时再决定收手或继续。' : '对方先手,稍候。'}`);
-          if (auto) void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {}); // 走带重试的发送通道
+          if (auto) this.guestAutoAct(session, peer, auto); // 带 8 秒自愈重发(act 丢失会双等待死锁)
           return;
         }
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
@@ -1071,11 +1090,13 @@ export class CasinoWorld implements World {
           const myTurn = kv.turn === 'you';
           const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
           const autoText = auto ? `已自动执行 act ${auto.join(' ')}。` : '';
-          const yakuText = (kv.newYaku ?? '') && kv.newYaku !== 'none' ? `成役:${kv.newYaku}。` : '';
+          const yakuRaw = String(kv.newYaku ?? '');
+          let yakuText = '';
+          if (yakuRaw && yakuRaw !== 'none') { try { yakuText = `成役:${decodeURIComponent(yakuRaw)}。`; } catch { yakuText = `成役:${yakuRaw}。`; } }
           const text = `[星邮联机] 花札局面:役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${yakuText}${autoText}`;
           if (stage === 'decide') push('casino.online_state', text);
           else pushSilent('casino.online_state', text);
-          if (auto) void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {});
+          if (auto) this.guestAutoAct(session, peer, auto); // 带 8 秒自愈重发(decide 卡死修复)
           return;
         }
         if (session.game === 'holdem') {
@@ -1624,15 +1645,14 @@ export class CasinoWorld implements World {
         // 客座端:无权威引擎,用缓存的 state kv 构建视角(自己的牌面可见,对方只有张数)。
         const kv = session.lastState ?? {};
         const own = kv.cards && kv.cards !== 'none' ? kv.cards.split(',') : [];
-        const aiRole = iAmBank ? 'ai' : 'player';
         return { state: 'active', snapshot: {
           ...base,
           game: 'oldmaid',
-          turnOwner: kv.turn === 'you' ? (iAmBank ? 'player' : 'ai') : (iAmBank ? 'ai' : 'player'),
+          turnOwner: kv.turn === 'you' ? 'player' : 'ai',
           winner: null,
-          playerCards: aiRole === 'player' ? own : [],
-          playerHandCount: aiRole === 'player' ? own.length : Number(kv.oppCount ?? 0),
-          aiHandCount: aiRole === 'ai' ? own.length : Number(kv.oppCount ?? 0),
+          playerCards: own,
+          playerHandCount: own.length,
+          aiHandCount: Number(kv.oppCount ?? 0),
           discardPairs: Number(kv.pairs ?? 0),
           lastDiscards: [],
           score: { ai: 0, player: 0 },
@@ -1642,18 +1662,18 @@ export class CasinoWorld implements World {
         } };
       }
       const st = om.state;
-      const idlerLocal: 'ai' | 'player' = iAmBank ? 'player' : 'ai';
       const myHand = iAmBank ? st.bankHand : st.playerHand;
       const peerHand = iAmBank ? st.playerHand : st.bankHand;
-      const turnOwner = st.turn === 'player' ? idlerLocal : (idlerLocal === 'ai' ? 'player' : 'ai');
+      // 席位统一(修泄露/两边显示相同):下方席 = 本机 AI(权威端取 bank 侧),上方席 = 远程对手只亮张数。
+      const turnOwner = st.turn === 'bank' ? 'player' : 'ai';
       return { state: 'active', snapshot: {
         ...base,
         game: 'oldmaid',
         turnOwner,
         winner: null,
-        playerCards: idlerLocal === 'player' ? peerHand.map((c) => formatCard(c)) : myHand.map((c) => formatCard(c)),
-        playerHandCount: idlerLocal === 'player' ? peerHand.length : myHand.length,
-        aiHandCount: idlerLocal === 'ai' ? myHand.length : peerHand.length,
+        playerCards: myHand.map((c) => formatCard(c)),
+        playerHandCount: myHand.length,
+        aiHandCount: peerHand.length,
         discardPairs: st.discards.length,
         lastDiscards: st.discards.slice(-3).map((pair) => pair.map((c) => formatCard(c))),
         score: { ai: 0, player: 0 },
@@ -1711,7 +1731,7 @@ export class CasinoWorld implements World {
           playerScore: Number(kv.myScore ?? 0),
           matchScores: { ai: 0, player: 0 },
           pickOwner: kv.stage === 'pick' ? (kv.turn === 'you' ? 'player' : 'ai') : null,
-          newYaku: (kv.newYaku && kv.newYaku !== 'none') ? String(kv.newYaku).split('·') : [],
+          newYaku: (() => { const raw = String(kv.newYaku ?? ''); if (!raw || raw === 'none') return []; try { return decodeURIComponent(raw).split('·'); } catch { return raw.split('·'); } })(),
           hanafudaHistory: [],
         } };
       }
@@ -1721,26 +1741,27 @@ export class CasinoWorld implements World {
         const c = who === 'bank' ? st.bankCollect : st.playerCollect;
         return { light: c.light.map((x) => hanafudaCardName(x.rank, x.suit)), tane: c.tane.map((x) => hanafudaCardName(x.rank, x.suit)), tan: c.tan.map((x) => hanafudaCardName(x.rank, x.suit)), kasu: c.kasu.map((x) => hanafudaCardName(x.rank, x.suit)) };
       };
-      // 席位约定(两台机器一致):下方"player"席 = 客座(引擎 player 侧),上方"ai"席 = 庄家(引擎 bank 侧)。
+      // 席位约定(与客座 kv 分支一致,修泄露):下方席 = 本机 AI(引擎 bank 侧,自己的牌明牌),
+      // 上方席 = 远程对手(引擎 player 侧,只亮张数)——两机各看各的牌,不再完全相同(主人实测)。
       return { state: 'active', snapshot: {
         ...base,
         game: 'hanafuda',
         phase: st.pickOwner ? 'playHand' : st.phase === 'decide' ? 'decide' : 'playHand',
         round: session.handsTotal + 1,
         roundsTotal: this.opts.cfg.hanafudaRounds,
-        turnOwner: st.turn === 'player' ? 'player' : 'ai',
+        turnOwner: st.turn === 'bank' ? 'player' : 'ai',
         matchOver: false,
         finalWinner: null,
         fieldCards: myView(st.field),
-        handCards: myView(st.playerHand),
-        aiHandCount: st.bankHand.length,
+        handCards: myView(st.bankHand),
+        aiHandCount: st.playerHand.length,
         deckCount: st.deck.length,
-        aiCollect: collectViewOf('bank'),
-        playerCollect: collectViewOf('player'),
-        aiScore: st.bankScore,
-        playerScore: st.playerScore,
+        aiCollect: collectViewOf('player'),
+        playerCollect: collectViewOf('bank'),
+        aiScore: st.playerScore,
+        playerScore: st.bankScore,
         matchScores: { ai: 0, player: 0 },
-        pickOwner: st.pickOwner ? (st.pickOwner === 'player' ? 'player' : 'ai') : null,
+        pickOwner: st.pickOwner ? (st.pickOwner === 'bank' ? 'player' : 'ai') : null,
         newYaku: st.newYaku,
         hanafudaHistory: [],
       } };

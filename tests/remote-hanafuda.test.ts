@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { freshHanafudaDeck } from '../src/hanafuda.ts';
 import { RemoteHanafuda } from '../src/remote-hanafuda.ts';
+import { parseOnlineMessage } from '../src/online-protocol.ts';
 
 /** 原序 48 张(1月[光,短,粕,粕]、2月[种,短,粕,粕]…8月[光,种,粕,粕]、12月[光,粕,粕,粕]):注入后不洗牌。 */
 const fixedDeck = () => freshHanafudaDeck();
@@ -139,6 +140,33 @@ describe('联机花札:决策与结算', () => {
 });
 
 describe('联机花札:协议视图', () => {
+  it('decide 阶段的 stateParts:newYaku 经 URI 编码,协议行不含裸空格(役名带空格曾把整条 state 打成非法=决策卡死)', () => {
+    const e = newEngine();
+    e.startHand();
+    // 直接注入成役态:走公开 API 太依赖牌序,这里用引擎内部状态模拟(仅测试可见)。
+    const st = e.state!;
+    st.phase = 'decide';
+    st.newYaku = ['赤短 5文', '流局牌 1文'];
+    const line = '@casino state ' + e.stateParts().join(' ');
+    expect(line).not.toContain('赤短 5文'); // 空格必须已被编码
+    const msg = parseOnlineMessage(line);
+    if (!msg) throw new Error('decide state 消息被解析器丢弃(修复前的回归)');
+    expect(decodeURIComponent(msg.kv.newYaku)).toBe('赤短 5文·流局牌 1文');
+  });
+
+  it('残局:一方手牌先空而山札有牌 → 换手时自动补一张,不卡死', () => {
+    const e = newEngine();
+    e.startHand();
+    const st = e.state!;
+    st.playerHand.length = 0; // 客座手牌打光,山札还有牌
+    st.turn = 'bank'; // 先把回合交给庄家(开局默认客座先手)
+    e.bankRunTurn(); // 庄家自动打完这一回合 → finishTurn 轮到空手的客座
+    if (!st.done && st.phase !== 'decide' && !st.pickOwner) {
+      expect(st.playerHand.length).toBeGreaterThanOrEqual(1); // 空手方从山札补了牌(修复前恒为 0=无牌可打死循环)
+      expect(st.turn).toBe('player');
+    }
+  });
+
   it('stateParts 含 turn/stage/yourHand/field/score;牌名与本地映射一致', () => {
     const e = newEngine();
     e.startHand();

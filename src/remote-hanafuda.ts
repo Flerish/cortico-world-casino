@@ -255,6 +255,13 @@ export class RemoteHanafuda {
     st.turn = other;
     st.turnStartScore = this.scoreOf(other);
     st.phase = 'play';
+    // 残局修复(实测死锁):收对激进时一方手牌可比山札先空——轮到空手方无牌可打,reject 循环卡死。
+    // 规则自洽:空手方从山札暗补一张作为出牌资本;山札也空则流局(双方都无法再行动)。
+    const otherHand = other === 'bank' ? st.bankHand : st.playerHand;
+    if (otherHand.length === 0) {
+      if (st.deck.length > 0) otherHand.push(st.deck.pop()!);
+      else { this.settleDraw(); return; }
+    }
   }
 
   // ── 客座(协议动作) ──
@@ -321,6 +328,13 @@ export class RemoteHanafuda {
     st.turn = other;
     st.turnStartScore = this.scoreOf(other);
     st.phase = 'play';
+    // 残局修复(实测死锁):收对激进时一方手牌可比山札先空——轮到空手方无牌可打,reject 循环卡死。
+    // 规则自洽:空手方从山札暗补一张作为出牌资本;山札也空则流局(双方都无法再行动)。
+    const otherHand = other === 'bank' ? st.bankHand : st.playerHand;
+    if (otherHand.length === 0) {
+      if (st.deck.length > 0) otherHand.push(st.deck.pop()!);
+      else { this.settleDraw(); return; }
+    }
   }
 
   private settleDraw(): void {
@@ -376,7 +390,8 @@ export class RemoteHanafuda {
       `oppCollect=${[...opp.light, ...opp.tane, ...opp.tan, ...opp.kasu].map((c) => cardText(c)).join(',') || 'none'}`,
       `myKoikoi=${st.playerKoikoi}`,
       `oppKoikoi=${st.bankKoikoi}`,
-      `newYaku=${st.newYaku.join('·') || 'none'}`,
+      // 役名含中文与空格(如「赤短 5文」),必须 URI 编码——空格会破坏协议分词,整条 state 被解析器丢弃(decide 卡死根因)。
+      `newYaku=${encodeURIComponent(st.newYaku.join('·')) || 'none'}`,
     ];
     if (st.pickOwner === 'player') parts.push(`pick=2`, `pickCards=${st.pickCards.map((c) => cardText(c)).join(',')}`);
     if (st.phase === 'decide' && st.turn === 'player') parts.push('decide=1');
