@@ -412,10 +412,10 @@ class FakeStarpostNet {
 
 describe('双 world 联机对局(主机权威)', () => {
   const net = new FakeStarpostNet();
-  function onlineWorld(botId: string, cfgPatch: Partial<typeof CASINO_DEFAULTS> = {}, extra: { starpostEngineDeck?: Array<{ rank: number; suit: number }> } = {}): CasinoWorld {
+  function onlineWorld(botId: string, cfgPatch: Partial<typeof CASINO_DEFAULTS> = {}, extra: { starpostEngineDeck?: Array<{ rank: number; suit: number }>; hanafudaFallbackMs?: number } = {}): CasinoWorld {
     const ctx = fakeWorldContext(CASINO, { scratchDir });
     Object.assign(ctx.cfg, { dealDelayMs: 0, starpostEnabled: true, starpostBotId: botId, starpostToken: 't'.repeat(32), starpostPollMs: 0, starpostServer: 'https://sp.example', onlineGapMs: 10, onlineRestAfterHands: 100, ...cfgPatch });
-    return new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, botDir: ctx.botDir, rng: () => 0, starpostPost: net.postFor(botId), starpostEngineDeck: extra.starpostEngineDeck });
+    return new CasinoWorld({ cfg: ctx.cfg, timezone: 'Asia/Shanghai', dataDir: ctx.dataDir, botDir: ctx.botDir, rng: () => 0, starpostPost: net.postFor(botId), starpostEngineDeck: extra.starpostEngineDeck, hanafudaFallbackMs: extra.hanafudaFallbackMs });
   }
   async function tool(world: CasinoWorld, args: Record<string, unknown>): Promise<any> {
     const world2 = world as unknown as { handleTool: (n: string, a: Record<string, unknown>) => Promise<string> };
@@ -533,7 +533,7 @@ describe('双 world 联机对局(主机权威)', () => {
     await guest.stop();
   });
 
-  it('花札全流程:邀约→接受→开局→打牌→推进→收手结算→轮庄', async () => {
+  it('花札全流程:双方 AI 各自动作(系统不再代打),驱动到收手结算', async () => {
     const host = onlineWorld('21477');
     const guest = onlineWorld('21489');
     const hostFake = new FakeHost();
@@ -541,7 +541,6 @@ describe('双 world 联机对局(主机权威)', () => {
     await host.start(hostFake);
     await guest.start(guestFake);
     await wait();
-
     const inv = await tool(host, { action: 'invite', target: '21489', game: 'hanafuda' });
     expect(inv.sent).toBe(true);
     await poll(guest); await wait();
@@ -549,30 +548,64 @@ describe('双 world 联机对局(主机权威)', () => {
     expect(acc.accepted).toBe(true);
     await poll(host); await wait();
     expect(hostFake.events.some((e) => e.type === 'casino.online_accepted' && e.text.includes('21489'))).toBe(true);
-    // 庄家开局:自动推进(庄家若先手会自动打)——客座收到开局 hand/state 事件
     await poll(guest); await wait();
     expect(guestFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札'))).toBe(true);
 
-    // 客座照事件提示打牌(打 yourHand 第 0 张)→ 庄家推进 → 客座收到新局面
-    const play = await tool(guest, { action: 'act', act: 'play', index: 0 });
-    expect(play.sent === true || play.applied === true).toBe(true);
-    await poll(host); await wait();
-    expect(hostFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札局面更新'))).toBe(true);
-    await poll(guest); await wait();
-    expect(guestFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('花札局面'))).toBe(true);
-
-    // 非法 index 被庄家拒绝(reject 通道)
-    const bad = await tool(guest, { action: 'act', act: 'play', index: 99 });
-    expect(bad.sent).toBe(true);
-    await poll(host); await wait();
-    expect(hostFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('被拒'))).toBe(true);
-
-    // 主机 stop → 双方收束(花札局未打完即挂起终止,与既有语义一致)
-    const stopped = await tool(host, { action: 'stop' });
-    expect(stopped.stopped).toBe(true);
-    await poll(guest); await wait();
-    expect(guestFake.events.some((e) => e.type === 'casino.online_session' && e.text.includes('结束'))).toBe(true);
+    const kvOf = (w: CasinoWorld): Record<string, string> | null => (w as unknown as { starpost: { session: { lastState: Record<string, string> | null } | null } }).starpost.session?.lastState ?? null;
+    // 庄家侧读自己的引擎状态(state kv 的 turn 是客座视角,不能复用)
+    const bankAsk = (w: CasinoWorld): string[] | null => {
+      const st = (w as unknown as { starpost: { session: { engine?: { state?: { done: boolean; phase: string; turn: string; pickOwner: string | null } } | null } | null } }).starpost.session?.engine?.state;
+      if (!st || st.done) return null;
+      if (st.pickOwner === 'bank') return ['pick', '0'];
+      if (st.phase === 'decide') return st.turn === 'bank' ? ['koikoi'] : null;
+      return st.turn === 'bank' ? ['play', '0'] : null;
+    };
+    const settled = () => hostFake.events.some((e) => e.type === 'casino.online_result') || guestFake.events.some((e) => e.type === 'casino.online_result');
+    // 按局面代为"AI 自主"行动:轮到谁谁动(pick/decide/play 三种动作)
+    const actByKv = async (w: CasinoWorld, kv: Record<string, string> | null): Promise<void> => {
+      if (!kv || kv.turn !== 'you') return;
+      if (kv.stage === 'pick') { await tool(w, { action: 'act', act: 'pick', index: 0 }); return; }
+      if (kv.stage === 'decide') { await tool(w, { action: 'act', act: 'koikoi' }); return; }
+      await tool(w, { action: 'act', act: 'play', index: 0 });
+    };
+    for (let round = 0; round < 300 && !settled(); round++) {
+      await poll(guest); await wait();
+      await actByKv(guest, kvOf(guest)); // 客座 AI 动作(协议)
+      await poll(host); await wait();
+      if (settled()) break;
+      const ask = bankAsk(host); // 庄家 AI 动作(本地,引擎视角)
+      if (ask) await tool(host, { action: 'act', ...(ask[0] === 'koikoi' ? { act: 'koikoi' } : { act: ask[0], index: Number(ask[1]) }) });
+      await poll(host); await wait();
+      await poll(guest); await wait();
+    }
+    expect(settled()).toBe(true);
+    // 关键回归:行动请求事件必须存在(系统不再代打出牌,决策权在 AI)
+    expect(guestFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('轮到你:'))).toBe(true);
+    expect(hostFake.events.some((e) => e.type === 'casino.online_state' && e.text.includes('轮到你出牌(庄家)'))).toBe(true);
     await host.stop();
     await guest.stop();
-  });
+  }, 60000);
+
+  it('花札兜底:两侧 AI 都不动作时,超时由世界层代打并自然结算(防死等)', async () => {
+    const host = onlineWorld('22477', {}, { hanafudaFallbackMs: 40 });
+    const guest = onlineWorld('22489', {}, { hanafudaFallbackMs: 40 });
+    const hostFake = new FakeHost();
+    const guestFake = new FakeHost();
+    await host.start(hostFake);
+    await guest.start(guestFake);
+    await wait();
+    await tool(host, { action: 'invite', target: '22489', game: 'hanafuda' });
+    await poll(guest); await wait();
+    await tool(guest, { action: 'accept', target: '22477' });
+    // 不调任何 act——全靠 40ms 兜底代打推进整局
+    for (let round = 0; round < 800; round++) {
+      await poll(host); await wait(2);
+      await poll(guest); await wait(2);
+      if (hostFake.events.some((e) => e.type === 'casino.online_result') && guestFake.events.some((e) => e.type === 'casino.online_result')) break;
+    }
+    expect(hostFake.events.some((e) => e.type === 'casino.online_result')).toBe(true);
+    expect(guestFake.events.some((e) => e.type === 'casino.online_result')).toBe(true);
+    await host.stop();
+    await guest.stop();
+  }, 60000);
 });

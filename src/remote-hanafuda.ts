@@ -291,6 +291,28 @@ export class RemoteHanafuda {
 
   // ── 庄家(本机 AI;world 层循环驱动) ──
 
+  // ── 庄家(本机 AI;联机时由 AI 自主动作,世界层超时兜底) ──
+
+  /** 庄家显式打出一张手牌(与客座 playerPlay 对称)。 */
+  bankPlay(index: number): void { this.playFor('bank', index); }
+  /** 庄家显式选收场牌(两张同月时)。 */
+  bankPickAt(index: number): void { this.pickFor('bank', index); }
+  /** 庄家成役继续(こいこい)。 */
+  bankKoikoi(): void {
+    const st = this.state!;
+    if (st.done) throw new Error('本局已结束');
+    if (st.phase !== 'decide' || st.turn !== 'bank') throw new Error('现在没有庄家的成役决策');
+    st.bankKoikoi = true;
+    this.endTurnAfterDecide('bank');
+  }
+  /** 庄家成役收手结算。 */
+  bankYame(): void {
+    const st = this.state!;
+    if (st.done) throw new Error('本局已结束');
+    if (st.phase !== 'decide' || st.turn !== 'bank') throw new Error('现在没有庄家的成役决策');
+    this.settle('bank');
+  }
+
   /** 庄家回合自动打牌 + 翻山札(打哪张用启发式)。 */
   bankRunTurn(): void {
     const st = this.state!;

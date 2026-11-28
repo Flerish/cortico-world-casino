@@ -126,6 +126,8 @@ export interface CasinoWorldOptions {
   starpostPost?: (url: string, body: unknown, headers?: Record<string, string>, timeoutMs?: number) => Promise<{ status: number; body: any }>;
   /** 可注入的联机引擎初始牌序(测试定牌)。 */
   starpostEngineDeck?: Card[];
+  /** 花札兜底代打超时毫秒(默认 30000;测试注入短值)。 */
+  hanafudaFallbackMs?: number;
 }
 
 /** 一次操作的结果:ok=false 时 text 是给界面或模型的拒绝理由。 */
@@ -294,6 +296,10 @@ export interface OnlineSessionShape {
   lastSettle: Record<string, string> | null;
   /** 协议消息连续发送失败次数(配额耗尽/链路中断时累加;收到对方消息或发送成功即清零)。 */
   sendFails?: number;
+  /** 最近一次 state 的局面指纹(重复收到同一局面不再唤醒 AI/重挂兜底——防消息风暴)。 */
+  lastStateFp?: string;
+  /** 兜底代打定时器:轮到本机 AI 但迟迟不动作(30 秒)时世界层代打,防对局死等。 */
+  autoActTimer?: ReturnType<typeof setTimeout> | null;
 }
 
 export class CasinoWorld implements World {
@@ -675,6 +681,7 @@ export class CasinoWorld implements World {
     const session = sp.session;
     if (!session) return;
     for (const t of session.timers) clearTimeout(t);
+    if (session.autoActTimer) { clearTimeout(session.autoActTimer); session.autoActTimer = null; }
     if (notifyPeer) {
       // 终止通知带三次重发(间隔 5 秒):链路抖动丢一次 stop,对端就会永远停在"游戏中"。
       // 对端重复处理 stop 是幂等的(无会话直接忽略),多发无害。
@@ -808,6 +815,9 @@ export class CasinoWorld implements World {
 
   /** 一手结束的统一出口:写回筹码账本、发 settle、推本地结果、按节奏安排庄家轮换。 */
   private async bankFinishHand(session: OnlineSessionShape, engine: RemoteBlackjack | RemoteOldMaid | RemoteHoldem | RemoteHanafuda, at: string): Promise<void> {
+    if (session.autoActTimer) { clearTimeout(session.autoActTimer); session.autoActTimer = null; } // 本手结束:兜底代打作废
+    // 结算途中若会话已被关闭(对方 stop 在途),不再发 settle/换庄/结果事件——防幽灵消息与单侧滞留。
+    if (!this.sessionLive(session)) { console.log('[casino] 结算时会话已关闭,跳过 settle/换庄'); return; }
     session.chips[session.bank] = engine.chips.bank;
     session.chips[session.peer] = engine.chips.player;
     session.lastState = this.kvFromParts(engine.stateParts());
@@ -815,6 +825,7 @@ export class CasinoWorld implements World {
     if (settleBody) {
       session.lastSettle = this.kvFromParts(settleBody);
       await this.onlineSend(session.peer, onlineLine('settle', settleBody)).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
+      if (!this.sessionLive(session)) { console.log('[casino] settle 送达后会话已关闭,停止后续调度'); return; } // await 期间对端 stop 落地
     }
     const s2 = engine.lastSettle!;
     const bankIsMe = session.bank === this.myBotId();
@@ -880,18 +891,40 @@ export class CasinoWorld implements World {
   }
 
   /** 花札:客座动作(play/pick/koikoi/yame)落庄家引擎,再推进庄家回合直到轮到客座或结算。 */
-  private async bankApplyHanafudaAct(session: OnlineSessionShape, engine: RemoteHanafuda, act: string, indexRaw: string | undefined, at: string): Promise<void> {
+  /** 花札动作落引擎:who='player' 为客座协议动作,who='bank' 为庄家本机 AI 动作(含兜底代打)。 */
+  private async bankApplyHanafudaAct(session: OnlineSessionShape, engine: RemoteHanafuda, act: string, indexRaw: string | undefined, at: string, who: 'player' | 'bank' = 'player'): Promise<void> {
     try {
       const index = Math.floor(Number(indexRaw ?? -1));
-      if (act === 'play') engine.playerPlay(index);
-      else if (act === 'pick') engine.playerPick(index);
-      else if (act === 'koikoi') engine.playerKoikoi();
-      else if (act === 'yame') engine.playerYame();
-      else throw new Error('花札的动作只有 play/pick/koikoi/yame');
+      if (who === 'bank') {
+        // 庄家本机 AI(或兜底):动作必须落 bank 侧——此前误落 player 侧造成回合错位死循环(主人实测)。
+        if (act === 'play') engine.bankPlay(index);
+        else if (act === 'pick') engine.bankPickAt(index);
+        else if (act === 'koikoi') engine.bankKoikoi();
+        else if (act === 'yame') engine.bankYame();
+        else throw new Error('花札的动作只有 play/pick/koikoi/yame');
+      } else {
+        if (act === 'play') engine.playerPlay(index);
+        else if (act === 'pick') engine.playerPick(index);
+        else if (act === 'koikoi') engine.playerKoikoi();
+        else if (act === 'yame') engine.playerYame();
+        else throw new Error('花札的动作只有 play/pick/koikoi/yame');
+      }
+      // AI(或兜底)已动作:本回合的兜底定时器使命完成。
+      if (session.autoActTimer) { clearTimeout(session.autoActTimer); session.autoActTimer = null; }
       await this.bankAdvanceHanafuda(session, engine, at);
     } catch (error) {
       const msgText = (error as Error).message;
-      if (msgText.includes('回合') || msgText.includes('已经结束')) {
+      if (who === 'bank') {
+        // 本机 AI 的错位动作(比如回合已推进):温和告知,不打断对局。
+        if (msgText.includes('回合') || msgText.includes('结束') || msgText.includes('选择')) {
+          this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你的动作未生效(局面已推进):${msgText}。以最新事件为准。`, at);
+          return;
+        }
+        this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你的动作未生效:${msgText}`, at);
+        return;
+      }
+      if (msgText.includes('回合') || msgText.includes('已经结束') || msgText.includes('没有场牌选择')) {
+        // 重复/迟到的客座动作(重发体系下的正常现象):温和重发当前局面,不发 reject(防 reject 风暴)。
         await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch(() => {});
         return;
       }
@@ -900,20 +933,21 @@ export class CasinoWorld implements World {
     }
   }
 
-  /** 客座自动动作(花札/抽鬼牌):发送 + 8 秒自愈——若届时仍轮到自己(动作在途丢失,
-   *  而庄家要收到动作才会发下一条 state,否则双等待死锁),按最新 kv 重算并重发(最多 3 次)。 */
-  private guestAutoAct(session: OnlineSessionShape, peer: string, auto: string[], tries = 3): void {
-    void this.onlineSend(peer, onlineLine('act', auto)).catch(() => {});
-    if (tries <= 0) return;
-    const t = setTimeout(() => {
-      const s2 = this.starpost?.session;
-      if (!s2 || s2 !== session || (s2 as OnlineSessionShape & { closed?: boolean }).closed) return;
-      const kv = s2.lastState;
-      if (!kv || kv.turn !== 'you' || (s2.game === 'hanafuda' && kv.stage === 'done')) return; // 局面已前进:动作生效
-      const next = s2.game === 'hanafuda' ? this.hanafudaAutoAction(kv) : s2.game === 'oldmaid' ? ['draw'] : null;
-      if (next) { console.log(`[casino] 客座自动动作自愈重发:${next.join(' ')}`); this.guestAutoAct(s2, s2.peer, next, tries - 1); }
-    }, 8000);
-    session.timers.push(t);
+  /** 花札客座:轮到本机 AI 时发行动请求(与单机同构,AI 自主决定),挂 30 秒兜底代打。
+   *  协议 act 的发送由 AI 调 casino_online 完成;兜底超时才由世界层代发。 */
+  private hanafudaGuestTurn(session: OnlineSessionShape, kv: Record<string, string>, push: (t: string, s: string) => void, silent: (t: string, s: string) => void, at: string): void {
+    const stage = kv.stage ?? 'play';
+    const myTurn = kv.turn === 'you';
+    const yakuRaw = String(kv.newYaku ?? '');
+    let yakuText = '';
+    if (yakuRaw && yakuRaw !== 'none') { try { yakuText = `成役:${decodeURIComponent(yakuRaw)}。`; } catch { yakuText = `成役:${yakuRaw}。`; } }
+    const text = `[星邮联机] 花札局面:役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${yakuText}`;
+    if (!myTurn) { silent('casino.online_state', `${text}对方行动中,稍候。`); return; }
+    const ask = stage === 'pick' ? '用 casino_online 的 act pick 0 或 act pick 1 选收哪张。'
+      : stage === 'decide' ? '用 casino_online 的 act koikoi(继续)或 act yame(收手)决策。'
+        : '用 casino_online 的 act play N 出牌(N 是你手牌的序号,从 0 起)。';
+    push('casino.online_state', `${text}轮到你:${ask}(30 秒未动作会按策略代打。)`);
+    this.armHanafudaFallback(session);
   }
 
   /** 花札客座自动决策(联机延迟修复):按本地策略生成协议动作,LLM 只在事件里点评。
@@ -924,32 +958,68 @@ export class CasinoWorld implements World {
     return ['play', String(hanafudaAiPlay(parseCardList(kv.yourHand), parseCardList(kv.field)))];
   }
 
-  /** 花札庄家端自动推进:庄家回合打牌、庄家 pick、庄家决策——循环到轮到客座或结算。 */
+  /** 会话是否仍然存活(未被 close/取代):所有进行中的异步推进都要过这道闸,
+   *  防止一方 stop 之后另一方还在结算、换庄、发幽灵消息(主人实测"一边退出一边挂着")。 */
+  private sessionLive(session: OnlineSessionShape): boolean {
+    const sp = this.starpost;
+    return Boolean(sp && sp.session === session && !(session as OnlineSessionShape & { closed?: boolean }).closed);
+  }
+
+  /** 花札兜底代打定时器(AI 自主决策,超时不动作才代打——与单机"AI 是真玩家"设计同构):
+   *  庄家端在轮到本机 AI 的决策点挂 30 秒;客座端在收到轮到自己的新局面挂 30 秒。
+   *  期间 AI 通过 casino_online act 正常动作即清除定时器;超时按启发式代打一次并继续等待。 */
+  private armHanafudaFallback(session: OnlineSessionShape, depth = 2): void {
+    const sp = this.starpost!;
+    if (session.autoActTimer) clearTimeout(session.autoActTimer);
+    if (depth <= 0) return;
+    session.autoActTimer = setTimeout(() => {
+      session.autoActTimer = null;
+      if (!this.sessionLive(session) || session.game !== 'hanafuda') return;
+      const at = nowIso(this.opts.timezone);
+      if (session.bank === this.myBotId()) {
+        const engine = session.engine as RemoteHanafuda | null;
+        const st = engine?.state;
+        if (!engine || !st || st.done) return;
+        if (st.pickOwner === 'bank') { console.log('[casino] 花札兜底代打(庄家 pick)'); void this.bankApplyHanafudaAct(session, engine, 'pick', String(hanafudaAiPick(st.pickCards)), at, 'bank'); return; }
+        if (st.phase === 'decide') { if (st.turn === 'bank') { console.log('[casino] 花札兜底代打(庄家决策)'); void this.bankApplyHanafudaAct(session, engine, hanafudaAiKoikoi(st.bankScore, st.playerScore) ? 'koikoi' : 'yame', undefined, at, 'bank'); } return; }
+        if (st.turn === 'bank') { console.log('[casino] 花札兜底代打(庄家出牌)'); void this.bankApplyHanafudaAct(session, engine, 'play', String(hanafudaAiPlay(st.bankHand, st.field)), at, 'bank'); }
+        return;
+      }
+      // 客座端:仍轮到自己才代发(新 state 到达会让本定时器因局面变化自然失效)。
+      const kv = session.lastState;
+      if (!kv || kv.turn !== 'you') return;
+      const auto = this.hanafudaAutoAction(kv);
+      console.log(`[casino] 花札兜底代打(客座 ${auto.join(' ')}):AI 30 秒未动作`);
+      void this.onlineSend(session.peer, onlineLine('act', auto)).then(() => this.armHanafudaFallback(session, depth - 1)).catch(() => { this.noteSendFailure(session.peer); });
+    }, Math.max(10, Math.floor(Number(this.opts.hanafudaFallbackMs) || 30000)));
+    session.timers.push(session.autoActTimer);
+  }
+
+  /** 花札庄家端推进:不再自动打庄家回合(主人反馈"牌是系统出的,不是我决定的")——
+   *  轮到本机 AI 的决策点即停下,发行动请求事件唤醒 AI,并挂 30 秒兜底。 */
   private async bankAdvanceHanafuda(session: OnlineSessionShape, engine: RemoteHanafuda, at: string): Promise<void> {
+    if (!this.sessionLive(session)) return; // 一方已退出/会话已关闭:停止一切推进与发送
     const st = engine.state;
     if (!st) return;
-    let guard = 0;
-    while (!st.done && guard++ < 200) {
-      if (st.pickOwner === 'bank') { engine.bankPick(); continue; }
-      if (st.pickOwner === 'player') break; // 等客座选
-      if (st.phase === 'decide') {
-        if (st.turn === 'bank') {
-          // 庄家成役:flush 一条让本机 AI 点评决策(收手/继续由启发式自动执行)。
-          this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 庄家成役:${st.newYaku.join(' · ')}(役分 我 ${st.bankScore} — 对方 ${st.playerScore}),按策略自动决定收手或继续。`, at);
-          engine.bankDecide(hanafudaAiKoikoi(st.bankScore, st.playerScore));
-        }
-        else break; // 客座决策(koikoi/yame)
-        continue;
-      }
-      if (st.turn === 'bank') { engine.bankRunTurn(); continue; }
-      break; // 轮到客座打牌
-    }
     if (st.done) { await this.bankFinishHand(session, engine, at); return; }
     session.lastState = this.kvFromParts(engine.stateParts());
     await this.onlineSend(session.peer, onlineLine('state', engine.stateParts())).catch((e) => { this.starpost!.lastError = (e as Error).message; this.noteSendFailure(session.peer); });
-    // 常规局面更新走静默事件(不唤醒 AI);成役(decide)才让 AI 开口点评决策。
+    if (!this.sessionLive(session)) return; // state 在途期间对方可能已 stop
+    const names = (cards: HanaCard[]) => cards.map((x) => hanafudaCardName(x.rank, x.suit)).join(' ');
     const yakuText = st.newYaku.length ? `成役:${st.newYaku.join(' · ')}。` : '';
-    this.onlineEventSilent('casino.online_state', session.peer, `[星邮联机] 花札局面更新:${yakuText}${engine.handDetail()}。${st.turn === 'player' ? '客座将自动行动。' : ''}`, at);
+    if (st.pickOwner === 'bank') {
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你(庄家)要打牌收对:场上有两张 ${names(st.pickCards)} 同月,你刚打出 ${names([st.pendingCard ?? st.bankHand[0]!])}。用 casino_online 的 act pick 0 或 act pick 1 选收哪张(30 秒未动作会按策略自动选)。${engine.handDetail()}`, at);
+      this.armHanafudaFallback(session);
+    } else if (st.phase === 'decide' && st.turn === 'bank') {
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 你(庄家)成役:${st.newYaku.join(' · ')}(役分 我 ${st.bankScore} — 对方 ${st.playerScore})。用 casino_online 的 act koikoi 继续搏大的 / act yame 收手结算(30 秒未动作会按策略自动决定)。`, at);
+      this.armHanafudaFallback(session);
+    } else if (st.turn === 'bank') {
+      this.onlineEvent('casino.online_state', session.peer, `[星邮联机] 轮到你出牌(庄家):手牌 ${names(st.bankHand)} · 场牌 ${names(st.field)} · 山札 ${st.deck.length}。用 casino_online 的 act play N 出牌(N 是手牌序号,从 0 起;30 秒未动作会代打)。${yakuText}`, at);
+      this.armHanafudaFallback(session);
+    } else {
+      // 轮到客座:客座 AI 自己动作(其机器有同款兜底);本机静默更新局面即可。
+      this.onlineEventSilent('casino.online_state', session.peer, `[星邮联机] 花札局面更新:${yakuText}${engine.handDetail()}。等待对方行动。`, at);
+    }
   }
 
   /** 德州:庄家本机 AI 的动作直接落引擎(不经过对方)。 */
@@ -1061,13 +1131,11 @@ export class CasinoWorld implements World {
           return;
         }
         if (session.game === 'hanafuda') {
-          // 花札:开局即发牌。常规动作(打牌/选场牌/こいこい决策)由本地策略自动执行——
-          // 一局 20+ 回合逐个等 LLM 会把延迟拖到不可用(主人反馈);开局用 flush 让 AI 说句开场白。
+          // 花札:开局即发牌,轮到谁谁行动(AI 自主,30 秒兜底代打)。
           const kv = msg.kv;
-          const myTurn = kv.turn === 'you';
-          const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
-          push('casino.online_state', `[星邮联机] 新一局花札开始(第 ${session.handsTotal + 1} 局):役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${myTurn ? '打牌等动作会自动执行;成役时再决定收手或继续。' : '对方先手,稍候。'}`);
-          if (auto) this.guestAutoAct(session, peer, auto); // 带 8 秒自愈重发(act 丢失会双等待死锁)
+          session.lastState = kv;
+          session.lastStateFp = `${session.handsTotal}|${kv.turn}|${kv.stage}|${kv.yourHand}|${kv.field}`;
+          this.hanafudaGuestTurn(session, kv, push, pushSilent, at);
           return;
         }
         push('casino.online_state', `[星邮联机] 新一手开始,请下注:casino_online act bet 金额(${this.opts.cfg.minBet}–${this.opts.cfg.maxBet})。`);
@@ -1084,19 +1152,15 @@ export class CasinoWorld implements World {
           return;
         }
         if (session.game === 'hanafuda') {
-          // 常规局面静默更新;成役(decide)才 flush 让 AI 点评决策;动作自动执行(延迟优先)。
+          // 常规局面更新;同局面指纹的重复 state(重发体系产物)不再唤醒 AI——防消息风暴(主人实测 decide 风暴)。
           const kv = msg.kv;
-          const stage = kv.stage ?? 'play';
-          const myTurn = kv.turn === 'you';
-          const auto = myTurn ? this.hanafudaAutoAction(kv) : null;
-          const autoText = auto ? `已自动执行 act ${auto.join(' ')}。` : '';
-          const yakuRaw = String(kv.newYaku ?? '');
-          let yakuText = '';
-          if (yakuRaw && yakuRaw !== 'none') { try { yakuText = `成役:${decodeURIComponent(yakuRaw)}。`; } catch { yakuText = `成役:${yakuRaw}。`; } }
-          const text = `[星邮联机] 花札局面:役分 你 ${kv.myScore ?? 0} — 对方 ${kv.oppScore ?? 0} · 你的手牌 ${kv.yourHand ?? '?'} · 场牌 ${kv.field ?? '?'} · 山札 ${kv.deck ?? '?'}。${yakuText}${autoText}`;
-          if (stage === 'decide') push('casino.online_state', text);
-          else pushSilent('casino.online_state', text);
-          if (auto) this.guestAutoAct(session, peer, auto); // 带 8 秒自愈重发(decide 卡死修复)
+          const fp = `${session.handsTotal}|${kv.turn}|${kv.stage}|${kv.yourHand}|${kv.field}`;
+          if (session.lastStateFp === fp && kv.turn !== 'you') return; // 重复且非我方回合:静默跳过
+          const isMyTurnSame = session.lastStateFp === fp && kv.turn === 'you';
+          session.lastState = kv;
+          session.lastStateFp = fp;
+          if (!isMyTurnSame) this.hanafudaGuestTurn(session, kv, push, pushSilent, at);
+          // 同一轮到我的重复局面:不重复刷事件,但兜底定时器保持挂着即可。
           return;
         }
         if (session.game === 'holdem') {
@@ -1987,11 +2051,13 @@ export class CasinoWorld implements World {
             const at = nowIso(this.opts.timezone);
             if (session.game === 'blackjack') await this.bankApplyBlackjackAct(session, session.engine as RemoteBlackjack, act, [act, ...(act === 'bet' ? [String(args.amount)] : [])], at);
             else if (session.game === 'holdem') await this.bankApplyHoldemAct(session, session.engine as RemoteHoldem, act, act === 'bet' || act === 'raise' ? String(args.amount ?? '') : undefined, at, 'bank');
-            else if (session.game === 'hanafuda') await this.bankApplyHanafudaAct(session, session.engine as RemoteHanafuda, act, act === 'play' || act === 'pick' ? String(args.index ?? '') : undefined, at);
+            else if (session.game === 'hanafuda') await this.bankApplyHanafudaAct(session, session.engine as RemoteHanafuda, act, act === 'play' || act === 'pick' ? String(args.index ?? '') : undefined, at, 'bank');
             return JSON.stringify({ applied: true, act, note: '动作已落到庄家引擎;结果以事件返回。' });
           }
           const parts = [act, ...(act === 'bet' || act === 'raise' ? [String(args.amount ?? '')] : act === 'play' || act === 'pick' ? [String(args.index ?? '')] : [])];
           try {
+            // AI 自主动作已发出:兜底代打作废(客座侧)。
+            if (session.autoActTimer) { clearTimeout(session.autoActTimer); session.autoActTimer = null; }
             await sp.client.sendPrivate(session.peer, onlineLine('act', parts));
             session.sendFails = 0;
           } catch (e) {
