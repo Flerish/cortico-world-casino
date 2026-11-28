@@ -833,7 +833,8 @@ export class CasinoWorld implements World {
     // 胜负文案同口径(修复前写反:庄家赢 6 文却播报"我输 6",与筹码数字自相矛盾——主人 AI 反馈的分数问题)。
     const myDelta = bankIsMe ? -s2.delta : s2.delta;
     const label = s2.winner === 'push' ? '平局' : ((s2.winner === 'bank') === bankIsMe ? '我赢' : '我输');
-    this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
+    // 局号与客座侧统一(settleParts 的 hands 已含本手;此处 handsTotal 在下方才自增,+1 对齐)。
+    this.onlineEvent('casino.online_result', session.peer, `[星邮联机] 第 ${session.handsTotal + 1} 手结算(${s2.reason}):${label} ${Math.abs(myDelta)}。庄家 ${engine.handDetail()}。会话筹码 我 ${session.chips[this.myBotId()]} / 对方 ${session.chips[session.peer]}。`, at);
     session.handsTotal++;
     this.bankScheduleNext();
   }
