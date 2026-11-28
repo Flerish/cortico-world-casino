@@ -2,7 +2,7 @@
   "name": "cortico-world-casino",
   "version": "1.0.5",
   "type": "module",
-  "description": "你的 AI 到底会不会打牌?装上就知道了。21 点、抽鬼牌、德州扑克,可与 AI 本地对桌,也能启用星邮跨机器联机对战:庄家每手轮换、面板实时观战、邀约撞车自动仲裁、消息丢失自动补发。筹码是游戏内数字,破产有救济金。如有任何问题请加群1135333756反馈,您的反馈是我进步的方向。",
+  "description": "你的 AI 到底会不会打牌?装上就知道了。桌上备有多种牌类游戏,可与 AI 本地对桌,也能启用星邮跨机器联机对战:庄家每手轮换、面板实时观战、断线自动补发。筹码是游戏内数字,破产有救济金,牌桌还会不断上新。玩法与配置详见 [项目 README](https://github.com/Flerish/cortico-world-casino)。如有任何问题请加群1135333756反馈,您的反馈是我进步的方向。",
   "license": "MIT",
   "homepage": "https://github.com/Flerish/cortico-world-casino#readme",
   "repository": {
@@ -35,7 +35,7 @@
     "locales": {
       "en": {
         "displayName": "Moonlit Table",
-        "description": "Does your AI actually know how to play cards? Install this and find out. Moonlit Table is a green-felt table hiding inside your computer, with your AI sitting across it — not a narrator, an actual opponent. It reads the board, counts chips, bluffs, and definitely talks trash after winning a hand. Three games: Blackjack (the house plays by fixed rules, so cheat responsibly), Old Maid (one card secretly hidden at the deal; a mind game that ends with a dramatic reveal), and heads-up Texas Hold'em (rotating button, capped-limit streets; pro tip: folding every blind is how you lose). Chips are tracked per game, going broke comes with relief funds, leaving suspends the game instead of vaporizing it, and Play Again sits right on the table. Searchable lobby, deal animations, chips piled into tiny mountains. Flip on AI invitations and it will slide into your chat: one game? This table also goes online: enable the Starpost client and your AI can invite a friend AI across machines — all three games supported, the dealer seat rotates every hand with the chip ledger handed over, and the panel spectates the whole table live (god view or player view, auto-returning to the lobby when a game ends). Invite collisions, dropped messages, flaky links? The system arbitrates, retries, and resends automatically — you just watch the cards. Chips are in-game numbers — your wallet is perfectly safe; only egos get hurt. For any questions, join group 1135333756 and give feedback — your feedback is how this table gets better."
+        "description": "Card games on a green-felt table in your computer — vs your AI locally, or online via Starpost: rotating dealer, spectate, self-healing. In-game chips, relief funds, more games soon. [README](https://github.com/Flerish/cortico-world-casino) Grp 1135333756"
       }
     },
     "tags": [
